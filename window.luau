@@ -15,8 +15,10 @@ local ABOUT = "Recent Granola meetings. Preview summaries, gather meetings with 
 local SECRET = "api-key"
 
 local api_key: string? = nil
--- The pane the user last worked in, not the panel: the default agent and the new agent's directory.
+-- The pane the user last worked in, not the panel: the new agent's directory.
 local last_pane: number? = nil
+-- The agent block the user last worked in: where gathered meetings go.
+local last_agent: number? = nil
 local panel_pane: number? = nil
 
 local function utc_offset(): number
@@ -237,53 +239,27 @@ local function focused_cwd(cx: WindowCx): string
 	return tern.getenv("HOME") or "~"
 end
 
--- An agent's last reply as one plain line of at most 70 characters.
-local function gist(text: any): string
-	if type(text) ~= "string" then
-		return ""
-	end
-	local s = trim((string.gsub(string.gsub(text, "[%*_`#>]", ""), "%s+", " ")))
-	s = (string.gsub(s, "^[-%s]+", ""))
-	if utf8.len(s) and (utf8.len(s) :: number) > 70 then
-		s = string.sub(s, 1, (utf8.offset(s, 70) :: number) - 1) .. "…"
-	end
-	return s
-end
-
-local STATE_LABEL = { idle = "idle", working = "working", waiting_input = "waiting for you", exited = "exited" }
-
-local function agent_items(cx: WindowCx): { PickItem }
-	local items: { PickItem } = {}
-	local agents = cx.agents:list()
-	table.sort(agents, function(a, b)
-		if (a.pane == last_pane) ~= (b.pane == last_pane) then
-			return a.pane == last_pane
-		end
-		return a.pane > b.pane
-	end)
-	for _, a in agents do
+-- The agent to attach to: the one you last worked in, else the newest agent in the panel's tab;
+-- nil when there is none (a new one starts).
+local function target_agent(cx: WindowCx): number?
+	local live: { [number]: boolean } = {}
+	for _, a in cx.agents:list() do
 		if a.state ~= "exited" then
-			local last = gist(a.last_message)
-			local who = if type(a.model) == "string" then a.model elseif type(a.command) == "string" then a.command else "agent"
-			table.insert(items, {
-				label = basename(a.cwd) .. " · " .. who,
-				detail = (STATE_LABEL[a.state] or a.state) .. (if last ~= "" then " — " .. last else ""),
-				group = "Agent sessions",
-				icon = "sparkle",
-				current = a.pane == last_pane,
-				pane = a.pane,
-			})
+			live[a.pane] = true
 		end
 	end
-	local cwd = focused_cwd(cx)
-	table.insert(items, {
-		label = "New agent in " .. basename(cwd),
-		detail = cwd,
-		group = "New",
-		icon = "plus",
-		cwd = cwd,
-	})
-	return items
+	if last_agent and live[last_agent] and cx.session:pane(last_agent) then
+		return last_agent
+	end
+	local panel = find_panel(cx)
+	local tab = if panel then cx.session:tab_of(panel) else nil
+	local best: number? = nil
+	for _, p in cx.session:panes() do
+		if live[p.pane] and p.tab == tab and (best == nil or p.pane > best) then
+			best = p.pane
+		end
+	end
+	return best
 end
 
 -- Writes a long document where the agent can read it; nil when it goes inline.
@@ -299,27 +275,12 @@ local function spill(doc: string, titles: { string }): string?
 	return path
 end
 
-local function dispatch(cx: WindowCx, target: any, text: string, count: number)
-	local what = if count == 1 then "1 meeting" else tostring(count) .. " meetings"
-	if target.cwd then
-		local ok, pane = pcall(cx.agents.start, cx.agents, { prompt = text, cwd = target.cwd, how = "split" })
-		if not ok then
-			cx:toast("error", "Couldn't start an agent", tostring(pane))
-			return
-		end
-		cx:toast("success", "Sent " .. what .. " to a new agent", target.cwd)
-		return
-	end
-	local ok, err = pcall(cx.agents.ask, cx.agents, target.pane, text)
-	if not ok then
-		cx:toast("error", "Couldn't send to that agent", tostring(err))
-		return
-	end
-	pcall(cx.layout.focus, cx.layout, target.pane)
-	cx:toast("success", "Sent " .. what .. " to the agent")
-end
+-- Bracketed paste: the agent's composer takes the context as one paste and doesn't submit it.
+local PASTE_START, PASTE_END = "\27[200~", "\27[201~"
 
-local function send(cx: WindowCx, ids: { string })
+-- Puts the gathered meetings into the current agent's composer, ready for your question; with no
+-- agent around, starts one in the directory you were working in.
+local function attach(cx: WindowCx, ids: { string })
 	if #ids == 0 then
 		return
 	end
@@ -329,32 +290,30 @@ local function send(cx: WindowCx, ids: { string })
 		for _, n in notes do
 			table.insert(titles, context.title(n))
 		end
-		c:pick({
-			items = agent_items(c),
-			placeholder = "Send " .. (if #notes == 1 then "“" .. titles[1] .. "”" else tostring(#notes) .. " meetings") .. " to…",
-			icon = "sparkle",
-			action = "send here",
-		}):next(function(target, _err, c2)
-			if target == nil then
+		local ok, path = pcall(spill, doc, titles)
+		if not ok then
+			c:toast("error", "Couldn't write the context file", tostring(path))
+			return
+		end
+		local text = context.attachment(doc, titles, path)
+		local what = if #notes == 1 then "“" .. titles[1] .. "”" else tostring(#notes) .. " meetings"
+		local how = if path then "as a file" elseif model.transcript then "with transcripts" else "as synthesis"
+		local pane = target_agent(c)
+		if pane == nil then
+			local cwd = focused_cwd(c)
+			local started, err = pcall(c.agents.start, c.agents, {
+				prompt = text .. "\n\n" .. context.WAIT, cwd = cwd, how = "split",
+			})
+			if not started then
+				c:toast("error", "Couldn't start an agent", tostring(err))
 				return
 			end
-			(c2 :: WindowCx):prompt({
-				placeholder = "What should the agent do with it? (empty: read it and wait)",
-				action = "send",
-				icon = "sparkle",
-			}):next(function(instruction, _err2, c3)
-				if instruction == nil then
-					return
-				end
-				local wcx = c3 :: WindowCx
-				local ok, path = pcall(spill, doc, titles)
-				if not ok then
-					wcx:toast("error", "Couldn't write the context file", tostring(path))
-					return
-				end
-				dispatch(wcx, target, context.prompt(doc, titles, instruction, path), #notes)
-			end)
-		end)
+			c:toast("success", "Started an agent with " .. what, cwd)
+			return
+		end
+		c:run(pane, PASTE_START .. text .. PASTE_END)
+		pcall(c.layout.focus, c.layout, pane)
+		c:toast("success", "Added " .. what .. " " .. how, "Type your question and send")
 	end)
 end
 
@@ -466,8 +425,8 @@ tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
 	elseif act == "clear-filter" then
 		model.filter = nil
 		redraw(cx)
-	elseif act == "transcript" then
-		model.transcript = not model.transcript
+	elseif act == "mode" and (id == "synthesis" or id == "transcript") then
+		model.transcript = id == "transcript"
 		tern.kv.set("transcript", model.transcript)
 		redraw(cx)
 	elseif act == "pick" and id then
@@ -475,14 +434,14 @@ tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
 		redraw(cx)
 	elseif act == "expand" and id then
 		expand(cx, id)
-	elseif act == "send" and id then
-		send(cx, { id })
+	elseif act == "attach" and id then
+		attach(cx, { id })
 	elseif act == "copy" and id then
 		copy(cx, { id })
 	elseif act == "web" and id then
 		open_web(cx, id)
-	elseif act == "send-picked" then
-		send(cx, table.clone(model.picked))
+	elseif act == "attach-picked" then
+		attach(cx, table.clone(model.picked))
 	elseif act == "copy-picked" then
 		copy(cx, table.clone(model.picked))
 	elseif act == "clear-picked" then
@@ -513,10 +472,10 @@ tern.command({
 	end,
 })
 
--- Picks one recent meeting from the palette and sends it, without opening the panel.
+-- Picks one recent meeting from the palette and adds it to the agent, without opening the panel.
 tern.command({
-	id = "send",
-	title = "Granola: Send a meeting to an agent…",
+	id = "attach",
+	title = "Granola: Add a meeting to the agent",
 	icon = "sparkle",
 	run = function(cx)
 		with_key(cx, function(key, c)
@@ -534,10 +493,10 @@ tern.command({
 					pc:toast("info", "No summarized Granola meetings yet")
 					return
 				end
-				pc:pick({ items = items, placeholder = "Send which meeting?", icon = "sparkle", action = "pick meeting" })
+				pc:pick({ items = items, placeholder = "Add which meeting to the agent?", icon = "sparkle", action = "add" })
 					:next(function(item, _err, c2)
 						if item then
-							send(c2 :: WindowCx, { item.id })
+							attach(c2 :: WindowCx, { item.id })
 						end
 					end)
 			end
@@ -563,6 +522,10 @@ tern.command({
 tern.on("focus", function(ev: FocusEvent, cx: WindowCx)
 	if ev.pane ~= panel_pane then
 		last_pane = ev.pane
+		local info = cx.session:pane(ev.pane)
+		if info and info.kind == "agent" then
+			last_agent = ev.pane
+		end
 	end
 end)
 
@@ -577,6 +540,10 @@ local function start(cx: WindowCx)
 	local focused = cx.session:focused()
 	if focused and focused ~= find_panel(cx) then
 		last_pane = focused
+		local info = cx.session:pane(focused)
+		if info and info.kind == "agent" then
+			last_agent = focused
+		end
 	end
 	tern.secrets.get(SECRET):next(function(value, _err, cx2)
 		if type(value) == "string" and value ~= "" then

@@ -238,22 +238,20 @@ function Context.slug(s: string): string
 	return if slug == "" then "meeting" else slug
 end
 
--- Documents up to this size go inline in the agent prompt; longer ones are written to a file the
--- prompt points at, so transcripts don't flood the composer.
+-- Documents up to this size go inline into the agent's composer; longer ones are written to a
+-- local file the attachment names, so transcripts don't flood the composer.
 Context.INLINE_LIMIT = 6000
 
--- The prompt an agent receives: the user's instruction (or a default), then the document inline
--- or a pointer to `path`.
-function Context.prompt(doc: string, titles: { string }, instruction: string?, path: string?): string
-	local ask = instruction
-	if ask == nil or not string.find(ask, "%S") then
-		ask = "Read this meeting context and keep it in mind. Reply with a three-line recap, then wait for my instructions."
-	end
-	local list = table.concat(titles, "; ")
+-- What lands in the agent's composer: the document inline, or a pointer to `path`. It ends with a
+-- blank line so your question follows it.
+function Context.attachment(doc: string, titles: { string }, path: string?): string
 	if path then
-		return ask .. "\n\nContext: Granola notes for " .. list .. " are in `" .. path .. "`. Read that file first."
+		return "Meeting notes from Granola (" .. table.concat(titles, "; ") .. "): read `" .. path .. "`\n\n"
 	end
-	return ask .. "\n\n<granola-context>\n\n" .. doc .. "\n</granola-context>"
+	return "<granola-context>\n\n" .. doc .. "\n</granola-context>\n\n"
 end
+
+-- Appended when a new agent has to be started with the context as its first prompt.
+Context.WAIT = "Read this meeting context. Reply with a three-line recap, then wait for my instructions."
 
 return Context

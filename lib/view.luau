@@ -1,6 +1,6 @@
 --!strict
 -- The Granola panel's canvas: header, recent meetings (pick to gather, click to preview), and a
--- dock that sends the gathered meetings to an agent. Pure: model in, nodes out.
+-- dock that adds the gathered meetings to the current agent session. Pure: model in, nodes out.
 
 local context = require("./context")
 local ui = tern.ui
@@ -121,7 +121,7 @@ local function note_node(m: Model, note: any, picked: boolean): Node
 			end
 		end
 		table.insert(body, ui.node("row", { key = "actions", role = "granola.actions" }, {
-			button("send", "Send to agent", "send=" .. id, "Send this meeting to an agent session", "granola.primary"),
+			button("attach", "Add to agent", "attach=" .. id, "Add this meeting to the agent you're working with", "granola.primary"),
 			button("copy", "Copy", "copy=" .. id, "Copy this meeting as Markdown"),
 			button("open", "Open in Granola", "web=" .. id, "Open the note in Granola"),
 		}))
@@ -188,15 +188,20 @@ function View.render(m: Model): (Node, Node)
 	if count > 0 then
 		table.insert(dock, text("count", if count == 1 then "1 meeting gathered" else tostring(count) .. " meetings gathered",
 			"granola.count", { grow = 1 }))
-		table.insert(dock, button("send", "Send to agent", "send-picked", "Send the gathered meetings to an agent session", "granola.primary"))
+		table.insert(dock, button("attach", "Add to agent", "attach-picked", "Add the gathered meetings to the agent you're working with", "granola.primary"))
 		table.insert(dock, button("copy", "Copy", "copy-picked", "Copy the gathered meetings as Markdown"))
 		table.insert(dock, button("clear", "Clear", "clear-picked", "Forget the gathered meetings"))
 	else
-		table.insert(dock, text("hint", "☐ gathers meetings for an agent", "granola.muted", { grow = 1 }))
+		table.insert(dock, text("hint", "☐ gathers meetings for the agent", "granola.muted", { grow = 1 }))
 	end
-	table.insert(dock, button("transcript", if m.transcript then "Transcripts: on" else "Transcripts: off", "transcript",
-		if m.transcript then "Send summaries only" else "Also send full transcripts",
-		if m.transcript then "granola.toggleOn" else "granola.button"))
+	-- What goes along: the AI synthesis, or the synthesis plus the full transcript. Either becomes a
+	-- local file once it is too long to paste.
+	table.insert(dock, ui.node("row", { key = "mode", role = "granola.segment" }, {
+		button("synthesis", "Synthesis", "mode=synthesis", "Send the AI summary and your notes",
+			if m.transcript then "granola.segmentOff" else "granola.segmentOn"),
+		button("transcript", "Full transcript", "mode=transcript", "Also send the full transcript",
+			if m.transcript then "granola.segmentOn" else "granola.segmentOff"),
+	}))
 	return ui.node("col", { key = "granola", role = "granola.panel" }, children),
 		ui.node("row", { key = "dock", role = "granola.dock" }, dock)
 end
