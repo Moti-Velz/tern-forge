@@ -58,3 +58,14 @@ o.bind("SUPER + W", "Close window or Tern pane", function()
     hl.dispatch(hl.dsp.window.close())
   end
 end)
+
+-- Super+Shift+A on Tern opens a new agent block beside the focused pane; anywhere else it still
+-- opens ChatGPT. Was: Omarchy's "ChatGPT" web app.
+hl.unbind("SUPER + SHIFT + A")
+o.bind("SUPER + SHIFT + A", "New Tern agent, else ChatGPT", function()
+  if is_tern(hl.get_active_window()) then
+    send("SUPER + SHIFT", "A")
+  else
+    hl.dispatch(hl.dsp.exec_cmd(o.launch_webapp("https://chatgpt.com")))
+  end
+end)

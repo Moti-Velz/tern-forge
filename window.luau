@@ -121,3 +121,6 @@ tern.bind("cmd+w", function(cx)
 		cx:command("close_pane")
 	end
 end)
+
+-- Super+Shift+A, handed over by Hyprland: Tern's own "New agent block" (also Ctrl+Shift+A).
+tern.bind("cmd+shift+a", "new_agent_block")
