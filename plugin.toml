@@ -1,0 +1,8 @@
+schema = 1
+id = "granola"
+name = "Granola"
+version = "0.1.0"
+description = "Granola meetings beside your terminal: preview summaries, gather meetings, and send them (with transcripts if you like) as context to agent sessions."
+icon = "sparkle"
+window = "window.luau"
+styles = ["styles.css"]
