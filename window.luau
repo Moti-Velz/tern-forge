@@ -2,6 +2,7 @@
 local wt = require("./worktrunk")
 local view = require("./view")
 local visualize = require("./visualize")
+local usage = require("./usage/window")
 
 local cache = {}
 local inflight = {}
@@ -24,7 +25,7 @@ local watchForms
 local function records(key)
 	local value = tern.kv.get(key)
 	if value == nil then return {} end
-	assert(type(value) == "table", "Overseer storage is invalid: " .. key)
+	assert(type(value) == "table", "Forge storage is invalid: " .. key)
 	return value
 end
 
@@ -236,7 +237,7 @@ local function model(cx)
 		for _, worktree in (entry and entry.worktrees or {}) do
 			local item = table.clone(worktree)
 			item.deleting = removing(worktree.path, jobs)
-			-- A name given in Overseer wins; Orca's name (fixed there by hand) comes next.
+			-- A name given in Forge wins; Orca's name (fixed there by hand) comes next.
 			item.displayName = names[project.id] and names[project.id][worktree.path] or worktree.orca and worktree.orca.name
 			item.pr = not worktree.is_main and worktree.branch and entry.prs and entry.prs[worktree.branch] or nil
 			item.ticket = ticketFor(project, worktree)
@@ -267,9 +268,9 @@ local NAVIGATOR = {
 	title = "Projects", about = "Local repositories, their worktrees, and dedicated sessions.",
 }
 
--- Overseer also owns PR outline canvases; only navigators show Projects.
+-- Forge also owns PR outline canvases; only navigators show Projects.
 local function isNavigator(canvas)
-	return canvas.owner == "overseer" and canvas.title == NAVIGATOR.title
+	return canvas.owner == "forge" and canvas.title == NAVIGATOR.title
 end
 
 -- The window's one Projects slot: the navigator canvas, or a form shown in its
@@ -280,7 +281,7 @@ local function slot(cx)
 	if slotPane and not cx.session:pane(slotPane) then slotPane = nil end
 	local found = {}
 	for _, pane in cx.session:panes() do
-		if pane.block == "overseer.form" then table.insert(found, pane.pane) end
+		if pane.block == "forge.form" then table.insert(found, pane.pane) end
 	end
 	for _, canvas in cx.canvas:list() do
 		if isNavigator(canvas) and cx.session:pane(canvas.pane) then table.insert(found, canvas.pane) end
@@ -294,7 +295,7 @@ local function slot(cx)
 	end
 	if not slotPane then return nil end
 	local info = cx.session:pane(slotPane)
-	return slotPane, if info and info.block == "overseer.form" then "form" else "canvas"
+	return slotPane, if info and info.block == "forge.form" then "form" else "canvas"
 end
 
 local function draw(cx)
@@ -837,7 +838,7 @@ local function openForm(cx, mode, project, worktree)
 	local names = worktree and records("worktree-names")[project.id]
 	local id = token()
 	local pane = swapSlot(cx, current, function()
-		return cx:new_block("overseer.form", {
+		return cx:new_block("forge.form", {
 			id, mode,
 			if worktree then worktree.branch or "Detached HEAD" else project and project.name or "",
 			if worktree then names and names[worktree.path] or ""
@@ -846,7 +847,7 @@ local function openForm(cx, mode, project, worktree)
 			if mode == "create" and project then wt.creation_note(project) else "",
 		}, "beside")
 	end)
-	if not pane then report(cx, "Reload the Overseer plugin.", "Form unavailable"); return end
+	if not pane then report(cx, "Reload the Forge plugin.", "Form unavailable"); return end
 	tern.kv.set("pending-form:" .. tostring(pane), {
 		token = id, mode = mode, project = project and project.id, path = worktree and worktree.path,
 	})
@@ -1005,7 +1006,7 @@ function pickProject(cx)
 	end
 end
 
--- Repositories registered in Orca that Overseer doesn't list yet.
+-- Repositories registered in Orca that Forge doesn't list yet.
 local function pickOrcaProject(cx)
 	if not requireLocal(cx) then return end
 	wt.orca_repos(function(repos, err, nextCx)
@@ -1198,7 +1199,7 @@ end
 
 local function forms(cx)
 	for _, pane in cx.session:panes() do
-		if pane.block == "overseer.form" and not inflight[pane.pane] then
+		if pane.block == "forge.form" and not inflight[pane.pane] then
 			local request = tern.kv.get("pending-form:" .. tostring(pane.pane))
 			if request then
 				local response = request.response or tern.kv.get("form:" .. request.token)
@@ -1239,11 +1240,11 @@ watchForms = function()
 		if not cx then watching = false; return end
 		local open = false
 		for _, pane in cx.session:panes() do
-			if pane.block == "overseer.form" then open = true; break end
+			if pane.block == "forge.form" then open = true; break end
 		end
 		if not open then watching = false; return end
 		local ok, err = pcall(forms, cx)
-		if not ok then tern.log.warn("Overseer form check failed: " .. tostring(err)) end
+		if not ok then tern.log.warn("Forge form check failed: " .. tostring(err)) end
 		tern.timer(100, step)
 	end
 	tern.timer(100, step)
@@ -1367,8 +1368,8 @@ local TICKET_PROMPT = "Please read ticket %s to understand your task and ask any
 local function projectNames()
 	local names = {}
 	for _, project in projects() do table.insert(names, project.name) end
-	if #names == 0 then return "No projects are registered in Overseer." end
-	return "Overseer projects: " .. table.concat(names, ", ") .. "."
+	if #names == 0 then return "No projects are registered in Forge." end
+	return "Forge projects: " .. table.concat(names, ", ") .. "."
 end
 
 -- A project named (in any case) or given by path; otherwise the current session's.
@@ -1376,7 +1377,7 @@ local function ticketProject(cx, wanted)
 	if wanted == nil then
 		local project = activeWorktree(cx)
 		if project then return project end
-		return nil, "The current session isn't an Overseer worktree, so name the project. " .. projectNames()
+		return nil, "The current session isn't a Forge worktree, so name the project. " .. projectNames()
 	end
 	if type(wanted) ~= "string" then return nil, "project must be a string." end
 	for _, project in projects() do
@@ -1419,7 +1420,7 @@ tern.carly.export("ticket_worktree", {
 end)
 
 tern.carly.context(function()
-	return "Overseer creates Linear-ticket worktrees with ticket_worktree. " .. projectNames()
+	return "Forge creates Linear-ticket worktrees with ticket_worktree. " .. projectNames()
 end)
 
 tern.on("canvas_action", function(ev, cx)
@@ -1480,8 +1481,23 @@ tern.override("new_tab", function(cx)
 	return true
 end)
 
-tern.chrome.status(function()
-	return { { text = "Projects", icon = "branch", command = "plugin.overseer.projects" } }
+-- Tern keeps one status formatter per plugin: subscription usage first (a click opens its
+-- panel), then the Projects shortcut.
+tern.chrome.status(function(pane)
+	local segments = usage.status(pane) or {}
+	table.insert(segments, { text = "Projects", icon = "branch", tone = "muted", command = "plugin.forge.projects" })
+	return segments
+end)
+
+-- Usage lives in the status bar, which Tern hides by default: turn it on once. Turning it
+-- off afterwards in Preferences sticks.
+tern.timer(0, function(cx)
+	if not cx or tern.kv.get("status-bar-offered") then return end
+	tern.kv.set("status-bar-offered", true)
+	if cx.settings:get("status_bar") ~= true then
+		cx.settings:set("status_bar", true)
+		cx:toast("info", "Status bar on", "Forge shows Claude / GPT usage there. Preferences turns it off.")
+	end
 end)
 
 -- Runs fn in a timer callback of its own, reporting (not raising) errors.

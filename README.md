@@ -1,26 +1,44 @@
 <div align="center">
 
-<h1><img src="docs/images/logo-640.png" alt="Overseer" width="320"></h1>
+<h1><img src="docs/images/logo-640.png" alt="Forge" width="320"></h1>
 
 **Mission control for parallel agent work.**
+
+Forge started as a fork of [Overseer](https://github.com/mmnavarr/overseer) by mmnavarr (MIT).
 
 One panel for every branch you have in flight: its worktree, its agents, its pull request and its ticket.<br>
 Click a row and you're in that branch's own workspace.
 
-<img src="docs/images/hero.png" alt="Overseer's Projects panel beside an omp agent asking a question" width="900">
+<img src="docs/images/hero.png" alt="Forge's Projects panel beside an omp agent asking a question" width="900">
 
 </div>
 
 ---
 
-Running five agents on five branches means five checkouts, a pile of terminals, and losing track of which agent is stuck waiting for you. Overseer is a [Tern](https://docs.stencil.so/tern/) plugin that fixes that:
+Running five agents on five branches means five checkouts, a pile of terminals, and losing track of which agent is stuck waiting for you. Forge is a [Tern](https://docs.stencil.so/tern/) plugin that fixes that:
 
 - **Every worktree gets its own Tern session.** Its tabs, shells and agents live there. Switching branches is one click, and nothing bleeds between them.
 - **You can see what every agent is doing.** A pulsing dot means an agent is working; a blue dot means one is waiting for you.
 - **PRs and tickets sit on the row.** GitHub PR state (draft, open, merged, closed) and the Linear ticket, both one click away.
 - **Worktrees come and go safely.** Creation and deletion run in the background through Orca, [Worktrunk](https://worktrunk.dev) or plain Git, whichever the project uses, with your hooks and approvals intact.
-- **Agents can start work for you.** Tell Tern's assistant *"Create an overseer worktree for ENG-123"* and you get a branch, a session and an [omp](https://omp.sh) agent already reading the ticket.
+- **Agents can start work for you.** Tell Tern's assistant *"Create a forge worktree for ENG-123"* and you get a branch, a session and an [omp](https://omp.sh) agent already reading the ticket.
 - **PRs can be understood at a glance.** **Visualize PR** turns a pull request into a diagram-first outline, without touching GitHub.
+
+## Subscription usage
+
+Forge also shows your Claude and ChatGPT subscription usage. The status bar shows it first, with a sparkle icon, like `5h 2% (1h56m) · 7d 3%`. The segment is tinted warn at 60% and error at 85% of the worst window. Click it to open the usage panel, docked beside the focused pane at full height (click again to close it), which shows the 5 h and 7 d windows for every account. Claude Pro/Max also shows per-model weekly limits and extra usage; ChatGPT/Codex also shows credits. A muted **Projects** segment after it toggles the Projects panel.
+
+Accounts come from Claude Code and Codex CLI credentials, omp logins, and OAuth logins made in the plugin (several accounts are allowed). You can give accounts aliases, hide them, reorder them, pin the usage to the status bar, and choose compact or card layouts. Usage is polled in the background, even while the panel is closed.
+
+Three palette commands control it:
+
+- **Subscription usage (Claude / GPT): show or hide the panel** (`plugin.forge.usage`)
+- **Claude usage: sign in to a subscription account (several allowed)** (`plugin.forge.usage-login`)
+- **GPT usage: sign in to a ChatGPT account (several allowed)** (`plugin.forge.usage-login-gpt`)
+
+Like upstream, Forge can write refreshed OAuth tokens back to Claude Code's `~/.claude/.credentials.json` (and Codex's credentials) when it refreshes them.
+
+Subscription usage is integrated from [tern-claude-usage](https://github.com/zerx-lab/tern-claude-usage) by zerx-lab (MIT). Its code lives in `usage/` with its own LICENSE, and its UI is translated to English.
 
 ## The panel
 
@@ -63,8 +81,8 @@ You need macOS or Linux and:
 | [omp](https://omp.sh) | ticket agents, Visualize PR | optional |
 
 ```sh
-git clone https://github.com/mmnavarr/overseer.git
-cd overseer
+git clone https://github.com/Moti-Velz/tern-forge.git
+cd tern-forge
 /Applications/Tern.app/Contents/MacOS/tern plugin link "$PWD"
 ```
 
@@ -93,9 +111,9 @@ On Linux, use the `tern` binary from your Tern install in place of the macOS pat
 
 Ask Tern's assistant, Carly:
 
-> Create an overseer worktree for ENG-123
+> Create a forge worktree for ENG-123
 
-Overseer creates `feature/ENG-123` from the project's base branch and opens its session. (With Orca, Orca names the branch from its own branch prefix setting.) Then it starts omp with:
+Forge creates `feature/ENG-123` from the project's base branch and opens its session. (With Orca, Orca names the branch from its own branch prefix setting.) Then it starts omp with:
 
 > *Please read ticket ENG-123 to understand your task and ask any questions you have before we start*
 
@@ -105,7 +123,7 @@ The project is the one you're in, or name it: *"…for ENG-123 in api"*. If the 
 
 <img src="docs/images/visualize-pr.png" alt="A Visualize PR outline: why the change exists, things to note, and a sequence diagram of the change" width="900">
 
-Overseer fetches the PR's metadata and full diff from GitHub, then has omp write an outline following HumanLayer's [visual-pr](https://github.com/humanlayer/skills) skill: why the change exists, what to watch for, and Mermaid diagrams, file-tree diffs and pseudocode. The local checkout only adds surrounding context. It takes a minute or two, and unchanged PRs reopen instantly from a cache.
+Forge fetches the PR's metadata and full diff from GitHub, then has omp write an outline following HumanLayer's [visual-pr](https://github.com/humanlayer/skills) skill: why the change exists, what to watch for, and Mermaid diagrams, file-tree diffs and pseudocode. The local checkout only adds surrounding context. It takes a minute or two, and unchanged PRs reopen instantly from a cache.
 
 It's **read-only by construction**: omp runs with only read/grep/glob tools and no shell, so it can't push, comment or edit anything.
 
@@ -128,12 +146,12 @@ flowchart LR
     panel -. "gh pr diff → omp (read-only)" .-> outline["PR outline canvas"]
 ```
 
-- **A backend owns each project's worktrees.** Overseer picks one per project, automatically: Orca when its CLI (`orca-ide`, or `orca` on macOS only, or `$ORCA_CLI_COMMAND`) is found and `repo show --repo path:<project>` succeeds; otherwise Worktrunk when `wt` is on PATH; otherwise plain Git. The choice is rechecked at most once a minute and on ↻.
-- **Worktrunk owns its worktrees.** Overseer calls `wt` and never passes `--yes`, `--no-hooks` or force flags. Your hooks and approval prompts run in a visible tab.
+- **A backend owns each project's worktrees.** Forge picks one per project, automatically: Orca when its CLI (`orca-ide`, or `orca` on macOS only, or `$ORCA_CLI_COMMAND`) is found and `repo show --repo path:<project>` succeeds; otherwise Worktrunk when `wt` is on PATH; otherwise plain Git. The choice is rechecked at most once a minute and on ↻.
+- **Worktrunk owns its worktrees.** Forge calls `wt` and never passes `--yes`, `--no-hooks` or force flags. Your hooks and approval prompts run in a visible tab.
 - **Orca owns its worktrees.** Worktrees it creates show in Orca's app, and Orca runs its own setup and archive hooks.
 - **Plain Git is the fallback.** It uses `git worktree add` and `git worktree remove`, and runs the repo's `orca.yaml` setup and archive scripts.
-- **Tern owns the sessions.** Overseer remembers which session belongs to which worktree and switches between them.
-- **The panel follows you.** Tern plugins can't pin a sidebar to the window, so Overseer keeps one Projects panel per window and moves it into whichever tab you're on.
+- **Tern owns the sessions.** Forge remembers which session belongs to which worktree and switches between them.
+- **The panel follows you.** Tern plugins can't pin a sidebar to the window, so Forge keeps one Projects panel per window and moves it into whichever tab you're on.
 - **Everything else is a read.** PR badges, ticket links, agent status and change counts come from `gh`, `linear`, `git` and Tern's own agent state.
 
 ## Safety
@@ -148,13 +166,13 @@ flowchart LR
 
 ## For agents
 
-This section is for coding agents (and humans) changing Overseer. It favors completeness over brevity.
+This section is for coding agents (and humans) changing Forge. It favors completeness over brevity.
 
 ### Runtime model
 
-Overseer is a Tern plugin written in Luau. `plugin.toml` declares two entry points:
+Forge is a Tern plugin written in Luau. `plugin.toml` declares two entry points:
 
-- `host.luau` runs in Tern's host and renders the `overseer.form` block, the native form used for New worktree, Rename, Change base branch and Set Linear workspace. `input.luau` is its Unicode-aware text editing.
+- `host.luau` runs in Tern's host and renders the `forge.form` block, the native form used for New worktree, Rename, Change base branch and Set Linear workspace. `input.luau` is its Unicode-aware text editing.
 - `window.luau` runs once per Tern window. It owns the Projects panel (a canvas that follows you between tabs), event hooks, the background job tracker, the Carly export, and Visualize PR canvases.
 
 Tern APIs are typed in the definitions Tern generates: `/Applications/Tern.app/Contents/MacOS/tern plugin types <dir>` writes `tern.d.luau`. Read it before using an API you haven't used here.
@@ -176,7 +194,7 @@ When debugging an overrun, add temporary `tern.log.warn(string.format("PROBE …
 
 | File | What lives there |
 |---|---|
-| `window.luau` | Project registry, model building (`model`), drawing (`draw`/`redraw`), the following panel (`slot`, `pin`, `follow`, `togglePanel`), session binding (`ensureSession`, `openWorktree`), forms swapped into the panel's slot, background jobs (`launchCreation`, `checkJobs`), ticket links (`ticketOf`, `ticketFor`), Linear workspace lookup, Visualize PR canvases, the Carly export, hooks and the 750 ms `tick`. |
+| `window.luau` | Project registry, model building (`model`), drawing (`draw`/`redraw`), the following panel (`slot`, `pin`, `follow`, `togglePanel`), session binding (`ensureSession`, `openWorktree`), forms swapped into the panel's slot, background jobs (`launchCreation`, `checkJobs`), ticket links (`ticketOf`, `ticketFor`), Linear workspace lookup, Visualize PR canvases, the Carly export, hooks and the 750 ms `tick`. It also registers the plugin's single status formatter, which combines the usage segment from `usage/` with the Projects segment. |
 | `worktrunk.luau` | Every external command: backend selection per project (Orca, Worktrunk or plain Git), `wt list`, the Orca CLI calls (repository lookup, `worktree create`, `worktree rm`, and the list behind Add project from Orca), the Worktrunk creation and removal command lines, `git` status and worktree listing, `gh pr list`/`gh pr view`/`gh pr diff`, `linear auth whoami`. Commands are argv arrays; `find_executable` checks Homebrew, `/usr/local/bin`, `~/.bun/bin` and `~/.local/bin`. |
 | `visualize.luau` | Visualize PR: prompt, read-only omp invocation, output extraction, cache. |
 | `view.luau` | Pure render: model → Tern UI node tree (rows, badges, tab rows, confirmations, menus). |
@@ -184,16 +202,20 @@ When debugging an overrun, add temporary `tern.log.warn(string.format("PROBE …
 | `host.luau`, `input.luau` | The native form block and its text input. |
 | `styles.css`, `icons.css` | Panel styles. `icons.css` is **generated** by `icons/generate-css.py` (plugin stylesheets can't load files, so icons are embedded as data URIs). |
 | `skills/visual-pr/` | HumanLayer's visual-pr skill, vendored unchanged (MIT). |
+| `usage/window.luau` | Subscription usage UI: the usage status segment, the usage panel, and the palette commands. |
+| `usage/host.luau` | Host half of usage: background polling, which runs even when the panel is closed. |
+| `usage/lib/*` | Supporting usage modules. |
+| `usage/tests/` | Usage tests, run with `python3 usage/tests/run.py`. |
 | `tests/test_worktree_operation.py` | Real Git and Worktrunk tests for the helper: shared removal-safety tests for both backends (Worktrunk skipped without `wt`), plus Git-only tests for placement, existing-path refusal, and the setup and archive scripts. |
 
 ### State
 
-Tern's plugin KV (`~/Library/Application Support/Tern/plugin-data/overseer/kv.json`), via `tern.kv`:
+Tern's plugin KV (`~/Library/Application Support/Tern/plugin-data/forge/kv.json`), via `tern.kv`:
 
 | Key | Shape | Notes |
 |---|---|---|
 | `projects` | `[{id, name, path, base, linear?}]` | `id` is the repository's shared Git directory, so linked checkouts dedupe. `linear` overrides the CLI workspace. |
-| `worktree-names` | `{[projectId]: {[path]: name}}` | Display names. Removed when Overseer deletes the worktree. |
+| `worktree-names` | `{[projectId]: {[path]: name}}` | Display names. Removed when Forge deletes the worktree. |
 | `sessions` | `{[path]: {id, host, project}}` | Worktree → Tern session binding. |
 | `icebox` | `{[projectId]: {[path]: true}}` | Parked worktrees. `show-icebox` is the header toggle. |
 | `jobs` | `{[id]: {kind = "create" \| "remove", project, receipt, pane, …}}` | Running creations and deletions; creations also carry `branch`, `displayName?` and `agentPrompt?`. Persisted so a plugin reload doesn't lose them. |
@@ -210,14 +232,14 @@ In-memory only: the per-project `cache` (worktrees, PRs, loading/error flags), `
 **The following panel.** Tern panes belong to one tab, and plugins can't add a window-level sidebar, so the window keeps exactly one Projects slot and moves it into whichever tab is shown, left of everything and full height. `slot` finds it: the navigator canvas or a form shown in its place, adopting what a reload left open and closing any extra. `pin` moves it with `move_to_tab` (or `unpark`) then `move(…, "left")` and steers the split ratio to the remembered share, since Tern resizes in cells and hidden tabs measure differently. `follow` runs on `focus`, `tab_created`, `tab_closed`, `pane_created`, `pane_closed`, `window_start` and every `tick`, so one disabled hook can't strand the panel. Moves work across sessions. Edge cases:
 
 - **Last terminal in a tab closed:** the panel would be left alone, so `follow` parks it; the tab closes as Tern would have, and the next shown tab (or new tab) takes the panel back.
-- **Overseer closes a session:** `closeManagedSession` switches away and calls `follow` first, so the panel leaves before the session closes.
+- **Forge closes a session:** `closeManagedSession` switches away and calls `follow` first, so the panel leaves before the session closes.
 - **Tern closes the panel's tab or session:** the panel dies with it. If you wanted it (`panel-open`) and its last tab is gone, `follow` opens a fresh one in the shown tab. If its tab is still there, you closed the panel yourself, and it stays closed until the shortcut.
 
 **Create.** Form or Carly → `wt.validate` → `launchCreation` → `checkJobs` (on `tick`) reads the receipt → on success: toast, apply the display name to the new worktree (found by the path Orca reported, else by branch: `createdTree`, `applyCreatedName`), and for ticket worktrees `startTicketAgent` opens the session and calls `cx.agents:start({command = "omp", prompt = …})`. Creation succeeded means the backend's command exited 0, not that every hook succeeded. What runs depends on the backend:
 
 - **Worktrunk:** `wt switch --create`, run in a background tab by `worktree-operation.sh`; `checkJobs` reads its receipt.
 - **Plain Git:** `git worktree add -b <branch> -- <repo>.<branch> <base>` beside the primary checkout (refused if that path already exists), then the `orca.yaml` `scripts.setup` in the new worktree. A failed setup reports creation failed but keeps the worktree.
-- **Orca:** `orca-ide worktree create --repo path:<repo> --name <branch> --base-branch <base> --no-parent --json`. Orca chooses the directory and branch and runs its own setup; Overseer reads the created path from the JSON answer.
+- **Orca:** `orca-ide worktree create --repo path:<repo> --name <branch> --base-branch <base> --no-parent --json`. Orca chooses the directory and branch and runs its own setup; Forge reads the created path from the JSON answer.
 
 **Delete.** Confirmation → `wt.validate_removal` (repository identity, branch, cleanliness) → removal job → receipt → close the worktree's session only if the directory is gone, then drop its name, binding and Ice Box entry. What runs depends on the backend:
 
@@ -242,6 +264,12 @@ python3 -B tests/test_worktree_operation.py -v
 bash -n worktree-operation.sh
 ```
 
+Subscription usage has its own tests. They need the standalone `luau` CLI on `PATH`:
+
+```sh
+python3 usage/tests/run.py
+```
+
 Smoke-test UI changes in an **isolated Tern window** so your real sessions are untouched:
 
 ```sh
@@ -254,11 +282,11 @@ TERN_CONFIG_DIR="$D/config" TERN_DAEMON_SOCKET="$D/daemon.sock" \
 Drive it with `tern ctl --control "$D/desktop.sock" …`:
 
 - `ready`, `palette Projects`, `key Enter`, `click X Y [right]`, `shot NAME` (screenshots land in `target/shots/tern/live/`)
-- `tree "[data-role=overseer\.worktreeRow]"` returns node rects and text
+- `tree "[data-role=forge\.worktreeRow]"` returns node rects and text
 - `a11y` returns menu items and their bounds
 - `carly lua "…"` runs Lua with a window `cx`, and `state` shows the result under `.carly.last_tool`
 
-Seed projects by writing `$D/config/plugin-data/overseer/kv.json` before launch.
+Seed projects by writing `$D/config/plugin-data/forge/kv.json` before launch.
 
 Other conventions:
 

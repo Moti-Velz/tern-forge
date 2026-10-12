@@ -20,7 +20,7 @@ class OperationFixture:
     TOOL = ""
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="overseer-operation-")
+        self.temp = tempfile.TemporaryDirectory(prefix="forge-operation-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         self.repo = self.root / "repo space é's"
@@ -39,9 +39,9 @@ class OperationFixture:
             "WORKTRUNK_WORKTREE_PATH": str(self.root / "created-{{ branch | sanitize }}"),
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_AUTHOR_NAME": "Overseer test",
+            "GIT_AUTHOR_NAME": "Forge test",
             "GIT_AUTHOR_EMAIL": "test@example.invalid",
-            "GIT_COMMITTER_NAME": "Overseer test",
+            "GIT_COMMITTER_NAME": "Forge test",
             "GIT_COMMITTER_EMAIL": "test@example.invalid",
         }
         self.git("init", "-b", "master")
@@ -151,7 +151,7 @@ class RemovalSafety:
         self.assertIn("branch refs/heads/" + branch, self.git("worktree", "list", "--porcelain"))
 
     def test_running_helper_publishes_its_pid_until_the_receipt_is_written(self):
-        # Overseer must not report failure while this PID is alive, even if
+        # Forge must not report failure while this PID is alive, even if
         # Tern stops reporting the operation's terminal.
         release = self.repo / ".git" / "release"
         hook = self.blocking_removal('while [ ! -e "$(git rev-parse --git-common-dir)/release" ]; do sleep 0.05; done')
@@ -190,9 +190,9 @@ class WorktrunkOperationTests(OperationFixture, RemovalSafety, unittest.TestCase
         self.git("commit", "-m", "fixture removal hook")
         # Only these generated fixture commands are trusted; product commands
         # retain their interactive approval prompts.
-        self.git("remote", "add", "origin", "https://github.com/overseer-tests/fixture.git")
+        self.git("remote", "add", "origin", "https://github.com/forge-tests/fixture.git")
         self.approvals.write_text(
-            '[projects."github.com/overseer-tests/fixture"]\n'
+            '[projects."github.com/forge-tests/fixture"]\n'
             "approved-commands = [" + json.dumps(command) + "]\n"
         )
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## 3.0.0 (2026-10-12)
+
+The plugin is now called Forge, and it adds subscription usage. This release is breaking: it has a new id, new action names and a new data directory.
+
+### Renamed
+
+- **Breaking: new id, actions and data directory.** The plugin id is `forge`. Actions are now `plugin.forge.*` (for example `plugin.forge.projects`), blocks are `forge.form` and `forge.usage`, and plugin data lives under `plugin-data/forge`.
+- **Overseer's KV and settings don't carry over.** Forge doesn't read them, so projects, names, sessions and Ice Box entries need to be set up again.
+
+### Added
+
+- **Subscription usage in the status bar.** Forge's status formatter shows usage first, like `5h 2% (1h56m) · 7d 3%`, with a sparkle icon. It's tinted warn at 60% and error at 85% of the worst window. Clicking it opens the usage panel. A muted **Projects** segment follows and toggles the Projects panel.
+- **Usage panel** (block `forge.usage`, docked beside the focused pane rather than floating, so its text renders at full sharpness and nothing is cut off). Shows Claude Pro/Max (5 h, 7 d, per-model weekly, extra usage) and ChatGPT/Codex (5 h, 7 d, credits) for every account. Accounts come from Claude Code and Codex CLI credentials, omp logins, and in-plugin OAuth logins, with aliases, hiding, ordering, pinning to the status bar, compact and card layouts, and a cross-account summary. It polls in the background even when the panel is closed.
+- **Usage palette commands.** "Subscription usage (Claude / GPT): show or hide the panel" (`plugin.forge.usage`), "Claude usage: sign in to a subscription account (several allowed)" (`plugin.forge.usage-login`), and "GPT usage: sign in to a ChatGPT account (several allowed)" (`plugin.forge.usage-login-gpt`).
+- **Status bar turned on once.** On first load, Forge turns Tern's status bar on and shows a toast. If you turn it off in Preferences, it stays off (kv flag `status-bar-offered`).
+
+Usage is integrated from [tern-claude-usage](https://github.com/zerx-lab/tern-claude-usage) by zerx-lab (MIT), kept in `usage/` with its own LICENSE. The UI is translated to English.
+
+Note: like upstream, usage can write refreshed OAuth tokens back to Claude Code's `~/.claude/.credentials.json` (and Codex's credentials) when it refreshes them.
+
 ## 2.1.0 (2026-10-12)
 
 Worktrunk is now optional. Each project uses one of three worktree backends, picked automatically: Orca, Worktrunk or plain Git.

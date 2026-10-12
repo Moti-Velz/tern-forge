@@ -59,7 +59,7 @@ on_exit() {
     if [ -n "$receipt_tmp" ]; then
         /bin/rm -f "$receipt_tmp"
     fi
-    # Only after the receipt: Overseer treats a missing PID file plus a missing
+    # Only after the receipt: Forge treats a missing PID file plus a missing
     # receipt as a helper that never started.
     /bin/rm -f "${receipt}.pid"
     exit "$status"
@@ -72,7 +72,7 @@ trap 'exit 129' HUP
 
 # Check receipt writability before creating anything. mktemp uses mode 0600.
 receipt_tmp=$(/usr/bin/mktemp "${receipt}.tmp.XXXXXX") || exit 73
-# Overseer checks this PID before treating a vanished terminal as a failure.
+# Forge checks this PID before treating a vanished terminal as a failure.
 printf '%s\n' "$$" > "${receipt}.pid" || exit 73
 
 # orca.yaml's contract, as Orca's hook runner does it: /bin/bash from the
@@ -103,7 +103,7 @@ create_worktree() {
             ;;
         orca)
             # Orca owns the path and branch naming; its JSON answer names the
-            # worktree it made, which Overseer reads beside the receipt.
+            # worktree it made, which Forge reads beside the receipt.
             "$tool" worktree create --repo "path:$repo" --name "$target" --base-branch "$option" --no-parent --json \
                 > "${receipt}.result"
             local status=$?

@@ -1,8 +1,8 @@
 schema = 1
-id = "overseer"
-name = "Overseer"
-version = "2.1.0"
-description = "Agent manager for parallel work: projects, their git worktrees (plain Git, Worktrunk or Orca), and a Tern session per worktree."
+id = "forge"
+name = "Forge"
+version = "3.0.0"
+description = "Agent workbench for parallel work: projects, their git worktrees (plain Git, Worktrunk or Orca), a Tern session per worktree, and Claude / ChatGPT subscription usage."
 icon = "branch"
 host = "host.luau"
 window = "window.luau"
@@ -10,5 +10,9 @@ styles = ["styles.css", "icons.css"]
 
 [[blocks]]
 id = "form"
-title = "Overseer form"
+title = "Forge form"
 palette = false
+
+[[blocks]]
+id = "usage"
+title = "Subscription usage"
