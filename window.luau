@@ -88,3 +88,36 @@ for _, d in DIRS do
 		enter(cx, dir)
 	end)
 end
+
+-- Super+W, handed over by Hyprland: close the focused pane through Tern's own close (which asks
+-- before closing a pane with something running), or, when it is the session's last pane, bubble
+-- up and let Hyprland close the Tern window. The session daemon keeps the programs either way.
+local function session_pane_count(cx: WindowCx): number
+	local tabs: { [number]: boolean } = {}
+	for _, s in cx.session:sessions() do
+		if s.current then
+			for _, t in s.tabs do
+				tabs[t] = true
+			end
+		end
+	end
+	local n = 0
+	for _, p in cx.session:panes() do
+		if p.tab and tabs[p.tab] and not p.parked then
+			n += 1
+		end
+	end
+	return n
+end
+
+tern.bind("cmd+w", function(cx)
+	if session_pane_count(cx) <= 1 then
+		tern.process.run({ "hyprctl", "dispatch", "hl.dsp.window.close()" }, { timeout_ms = 2000 }, function(r, _cx)
+			if r.status ~= 0 then
+				tern.log.warn("omarchy-nav: hyprctl failed", r.status, r.stderr, r.stdout)
+			end
+		end)
+	else
+		cx:command("close_pane")
+	end
+end)

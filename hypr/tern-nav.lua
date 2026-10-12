@@ -46,3 +46,15 @@ for _, k in ipairs(KEYS) do
     end
   end)
 end
+
+-- Super+W on Tern closes the focused pane (Tern bubbles back to close the window when it is the
+-- session's last pane); anywhere else it closes the window as before.
+-- Was: Omarchy's "Close window" (hl.dsp.window.close).
+hl.unbind("SUPER + W")
+o.bind("SUPER + W", "Close window or Tern pane", function()
+  if is_tern(hl.get_active_window()) then
+    send("SUPER", "W")
+  else
+    hl.dispatch(hl.dsp.window.close())
+  end
+end)

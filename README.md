@@ -37,6 +37,7 @@ binds, remove that line.
 | Key | Where | Does |
 | --- | --- | --- |
 | Super+← → ↑ ↓ | everywhere | Next Tern pane in that direction, else the next window |
+| Super+W | everywhere | In Tern: close the focused pane with Tern's normal close, which asks first if something is running. On the session's last pane it closes the Tern window instead; the session daemon keeps your programs. Elsewhere: close the window |
 | Super+Ctrl+Shift+arrow | Tern only, sent by Hyprland | Internal "focus entered Tern" signal; you don't press it |
 
 Super+Alt+←/→ are taken by Tern's preset keys, so they couldn't be used for the "entered" signal.
