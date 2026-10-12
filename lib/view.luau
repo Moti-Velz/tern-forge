@@ -1,25 +1,29 @@
 --!strict
--- The Granola panel's canvas: header, recent meetings (pick to gather, click to preview), and a
--- dock that adds the gathered meetings to the current agent session. Pure: model in, nodes out.
+-- The Granola block's view: a header, the meeting list (the selection is the keyboard cursor), the
+-- selected meeting's preview, and a footer with the gathered count, the mode and the keys. Pure:
+-- state in, nodes out.
 
 local context = require("./context")
 local ui = tern.ui
 
 local View = {}
 
-export type Model = {
+export type State = {
 	key: "checking" | "missing" | "ok",
 	notes: { any },
-	cursor: string?,
+	more: boolean,
 	loading: boolean,
 	error: string?,
-	filter: string?,
-	expanded: { [string]: boolean },
 	details: { [string]: any },
 	detail_errors: { [string]: string },
+	sel: number,
 	picked: { string },
+	preview: boolean,
+	filter: string?,
+	filtering: boolean,
 	transcript: boolean,
 	busy: string?,
+	help: boolean,
 	now: number,
 	offset: number,
 }
@@ -57,24 +61,24 @@ function View.matches(note: any, filter: string?, detail: any?): boolean
 	return string.find(string.lower(table.concat(hay, " ")), string.lower(filter), 1, true) ~= nil
 end
 
-function View.visible(m: Model): { any }
+function View.visible(s: State): { any }
 	local out = {}
-	for _, n in m.notes do
-		if View.matches(n, m.filter, m.details[n.id]) then
+	for _, n in s.notes do
+		if View.matches(n, s.filter, s.details[n.id]) then
 			table.insert(out, n)
 		end
 	end
 	return out
 end
 
-local function attendees(detail: any): string?
-	if type(detail.attendees) ~= "table" or #detail.attendees == 0 then
+local function attendees(detail: any, max: number): string?
+	if type(detail) ~= "table" or type(detail.attendees) ~= "table" or #detail.attendees == 0 then
 		return nil
 	end
 	local names: { string } = {}
 	for i, u in detail.attendees do
-		if i > 6 then
-			table.insert(names, string.format("+%d", #detail.attendees - 6))
+		if i > max then
+			table.insert(names, string.format("+%d", #detail.attendees - max))
 			break
 		end
 		table.insert(names, u.name or u.email or "?")
@@ -82,128 +86,164 @@ local function attendees(detail: any): string?
 	return table.concat(names, ", ")
 end
 
-local function note_node(m: Model, note: any, picked: boolean): Node
-	local id: string = note.id
-	local open = m.expanded[id] == true
-	local title = context.title(note)
-	local head = ui.node("row", { key = "head", role = "granola.noteHead" }, {
-		button("pick", if picked then "☑" else "☐", "pick=" .. id,
-			if picked then "Remove from the gathered context" else "Add to the gathered context",
-			if picked then "granola.checkOn" else "granola.check"),
-		ui.node("col", {
-			key = "label", role = "granola.noteLabel", grow = 1,
-			title = if open then "Hide preview" else "Preview " .. title,
-			actions = { click = "expand=" .. id },
-		}, {
-			text("title", title, "granola.noteTitle"),
-			text("when", context.when(note.created_at, m.now, m.offset), "granola.muted"),
-		}),
-	})
-	local children = { head }
-	if open then
-		local body: { Node } = {}
-		local detail = m.details[id]
-		local err = m.detail_errors[id]
-		if err then
-			table.insert(body, text("error", err, "granola.error"))
-		elseif detail == nil then
-			table.insert(body, text("loading", "Loading summary…", "granola.muted"))
-		else
-			local who = attendees(detail)
-			if who then
-				table.insert(body, text("who", who, "granola.muted"))
-			end
-			local summary = detail.summary_markdown or detail.summary_text
-			if type(summary) == "string" and string.find(summary, "%S") then
-				table.insert(body, ui.node("col", { key = "summary", role = "granola.summary" }, { ui.md(summary) }))
-			else
-				table.insert(body, text("nosummary", "No summary.", "granola.muted"))
-			end
-		end
-		table.insert(body, ui.node("row", { key = "actions", role = "granola.actions" }, {
-			button("attach", "Add to agent", "attach=" .. id, "Add this meeting to the agent you're working with", "granola.primary"),
-			button("copy", "Copy", "copy=" .. id, "Copy this meeting as Markdown"),
-			button("open", "Open in Granola", "web=" .. id, "Open the note in Granola"),
-		}))
-		table.insert(children, ui.node("col", { key = "body", role = "granola.noteBody" }, body))
+local function preview_node(s: State, note: any?): Node
+	if note == nil then
+		return text("empty", "", "granola.muted")
 	end
-	return ui.node("col", {
-		key = "n" .. id, role = if picked then "granola.notePicked" else "granola.note",
-	}, children)
+	local id: string = note.id
+	local body: { Node } = {}
+	local detail = s.details[id]
+	if s.detail_errors[id] then
+		table.insert(body, text("error", s.detail_errors[id], "granola.error"))
+	elseif detail == nil then
+		table.insert(body, text("loading", "Loading summary…", "granola.muted"))
+	else
+		local who = attendees(detail, 8)
+		if who then
+			table.insert(body, text("who", who, "granola.muted"))
+		end
+		local summary = detail.summary_markdown or detail.summary_text
+		if type(summary) == "string" and string.find(summary, "%S") then
+			table.insert(body, ui.md(summary))
+		else
+			table.insert(body, text("nosummary", "No summary.", "granola.muted"))
+		end
+	end
+	return ui.node("col", { key = "preview", role = "granola.preview" }, {
+		text("title", context.title(note), "granola.previewTitle"),
+		ui.node("col", { key = "body", role = "granola.previewBody" }, body),
+	})
 end
 
-function View.render(m: Model): (Node, Node)
-	local header = ui.node("row", { key = "header", role = "granola.header" }, {
+local KEYS = {
+	{ "↑↓", "move" }, { "space", "gather" }, { "⏎", "add to agent" }, { "→", "preview" },
+	{ "tab", "mode" }, { "/", "filter" }, { "?", "more keys" },
+}
+local MORE_KEYS = {
+	{ "j k", "move" }, { "g G", "top / bottom" }, { "← →", "hide / show preview" },
+	{ "c", "copy as Markdown" }, { "o", "open in Granola" }, { "x", "clear gathered" },
+	{ "r", "reload" }, { "K", "set API key" }, { "esc", "back to the agent" },
+}
+
+local function key_hints(list: { { string } }, key: string): Node
+	local spans: { any } = {}
+	for i, k in list do
+		if i > 1 then
+			table.insert(spans, ui.span("  ", "muted"))
+		end
+		table.insert(spans, ui.span(k[1], "key"))
+		table.insert(spans, ui.span(" " .. k[2], "muted"))
+	end
+	local node = ui.text(spans)
+	local p: { [string]: any } = node.p or {}
+	p.key, p.role = key, "granola.keys"
+	node.p = p
+	return node
+end
+
+function View.render(s: State, rows: number): BlockView
+	local header: { Node } = {
 		text("title", "Granola", "granola.heading", { grow = 1 }),
-		button("search", "Filter", "search", "Filter meetings by title or attendee"),
-		button("refresh", if m.loading then "…" else "↻", "refresh", "Reload recent meetings", "granola.icon"),
-		button("key", "Key", "key", "Set the Granola API key", "granola.icon"),
-	})
-	local children: { Node } = { header }
-	if m.busy then
-		table.insert(children, text("busy", m.busy, "granola.busy"))
+	}
+	if s.loading then
+		table.insert(header, text("loading", "loading…", "granola.muted"))
 	end
-	if m.error then
-		table.insert(children, text("error", m.error, "granola.error"))
-	end
-	if m.key == "missing" then
-		table.insert(children, ui.node("col", { key = "empty", role = "granola.empty" }, {
+	table.insert(header, button("reload", "↻", "reload", "Reload meetings (r)", "granola.icon"))
+	local main: { Node } = { ui.node("row", { key = "header", role = "granola.header" }, header) }
+
+	if s.key == "missing" then
+		table.insert(main, ui.node("col", { key = "empty", role = "granola.empty" }, {
 			text("title", "Connect Granola", "granola.emptyTitle"),
-			text("help", "Create a personal API key in the Granola app under Settings › Connectors › API keys "
-				.. "(Business or Enterprise plan), then paste it here. It is kept in the system keychain.", "granola.muted"),
-			button("setkey", "Set API key", "key", "Paste a Granola API key", "granola.primary"),
+			text("help", "Create a personal API key in Granola under Settings › Connectors › API keys "
+				.. "(Business or Enterprise plan). It is kept in the system keychain.", "granola.muted"),
+			button("setkey", "Set API key (K)", "key", "Paste a Granola API key", "granola.primary"),
 		}))
-		return ui.node("col", { key = "granola", role = "granola.panel" }, children), ui.node("col", { key = "dock" }, {})
+		return { main = ui.col(main) }
 	end
-	if m.filter and m.filter ~= "" then
-		table.insert(children, ui.node("row", { key = "filter", role = "granola.filter" }, {
-			text("label", "Filter: " .. m.filter, "granola.muted", { grow = 1 }),
-			button("clear", "✕", "clear-filter", "Show every meeting", "granola.icon"),
+	if s.error then
+		table.insert(main, text("error", s.error, "granola.error"))
+	end
+	if s.filtering or (s.filter and s.filter ~= "") then
+		table.insert(main, ui.node("row", { key = "filter", role = "granola.filter" }, {
+			text("label", "/ " .. (s.filter or "") .. (if s.filtering then "▏" else ""), "granola.filterText", { grow = 1 }),
+			text("hint", if s.filtering then "⏎ done · esc clear" else "esc clears", "granola.muted"),
 		}))
 	end
+
+	local shown = View.visible(s)
 	local picked: { [string]: boolean } = {}
-	for _, id in m.picked do
+	for _, id in s.picked do
 		picked[id] = true
 	end
-	local shown = View.visible(m)
-	local list: { Node } = {}
-	for _, n in shown do
-		table.insert(list, note_node(m, n, picked[n.id] == true))
+	local items: { any } = {}
+	local cur = math.clamp(s.sel, 1, math.max(1, #shown))
+	for i, n in shown do
+		local detail = context.when(n.created_at, s.now, s.offset)
+		local who = attendees(s.details[n.id], 3)
+		if who then
+			detail ..= " · " .. who
+		end
+		table.insert(items, {
+			-- The cursor is spelled out: the list's own selection highlight is faint in some themes.
+			label = (if i == cur then "▸ " else "  ") .. context.title(n),
+			detail = detail,
+			value = if picked[n.id] then "✓ gathered" else nil,
+			tone = if picked[n.id] then "accent" else nil,
+		})
 	end
-	if #shown == 0 and not m.loading and m.key == "ok" and m.error == nil then
-		table.insert(list, text("none",
-			if #m.notes == 0 then "No summarized meetings yet." else "No loaded meeting matches the filter.",
+	if #shown == 0 then
+		table.insert(main, text("none",
+			if s.loading then "Loading meetings…"
+				elseif #s.notes == 0 then "No summarized meetings yet."
+				else "No meeting matches the filter.",
 			"granola.muted"))
-	elseif m.loading and #m.notes == 0 then
-		table.insert(list, text("loading", "Loading meetings…", "granola.muted"))
-	end
-	if m.cursor then
-		table.insert(list, button("more", if m.loading then "Loading…" else "Load older meetings", "more",
-			"Fetch the next page of meetings"))
-	end
-	table.insert(children, ui.node("col", { key = "list", role = "granola.list" }, list))
-
-	local dock: { Node } = {}
-	local count = #m.picked
-	if count > 0 then
-		table.insert(dock, text("count", if count == 1 then "1 meeting gathered" else tostring(count) .. " meetings gathered",
-			"granola.count", { grow = 1 }))
-		table.insert(dock, button("attach", "Add to agent", "attach-picked", "Add the gathered meetings to the agent you're working with", "granola.primary"))
-		table.insert(dock, button("copy", "Copy", "copy-picked", "Copy the gathered meetings as Markdown"))
-		table.insert(dock, button("clear", "Clear", "clear-picked", "Forget the gathered meetings"))
 	else
-		table.insert(dock, text("hint", "☐ gathers · Alt+G M from the keyboard", "granola.muted", { grow = 1 }))
+		-- The list keeps the selection in view; with the preview open it leaves room below.
+		local lines = if s.preview then math.max(4, math.floor(rows * 0.4)) else math.max(4, rows - 8)
+		local list = ui.list(items)
+		local p: { [string]: any } = list.p or {}
+		p.key = "list"
+		p.selected = cur - 1 -- zero-based, like the `item` of its select events
+		p.max = { lines = lines }
+		p.actions = { select = "select", activate = "activate" }
+		list.p = p
+		table.insert(main, list)
+		if s.more then
+			table.insert(main, text("more", "↓ past the last meeting loads older ones", "granola.muted"))
+		end
+		if s.preview then
+			table.insert(main, preview_node(s, shown[math.clamp(s.sel, 1, #shown)]))
+		end
 	end
-	-- What goes along: the AI synthesis, or the synthesis plus the full transcript. Either becomes a
-	-- local file once it is too long to paste.
-	table.insert(dock, ui.node("row", { key = "mode", role = "granola.segment" }, {
-		button("synthesis", "Synthesis", "mode=synthesis", "Send the AI summary and your notes",
-			if m.transcript then "granola.segmentOff" else "granola.segmentOn"),
-		button("transcript", "Full transcript", "mode=transcript", "Also send the full transcript",
-			if m.transcript then "granola.segmentOn" else "granola.segmentOff"),
+
+	local count = #s.picked
+	local status: { Node } = {
+		text("count", if count == 0 then "nothing gathered"
+			elseif count == 1 then "1 gathered" else tostring(count) .. " gathered",
+			if count > 0 then "granola.count" else "granola.muted"),
+	}
+	if s.busy then
+		table.insert(status, text("busy", s.busy, "granola.busy"))
+	end
+	table.insert(status, ui.node("row", { key = "spacer", grow = 1 }, {}))
+	if count > 0 then
+		table.insert(status, button("attach", "Add to agent", "attach", "Add the gathered meetings to the agent (⏎)", "granola.primary"))
+		table.insert(status, button("clear", "Clear", "clear", "Forget the gathered meetings (x)"))
+	end
+	table.insert(status, ui.node("row", { key = "mode", role = "granola.segment" }, {
+		button("synthesis", "Synthesis", "mode=synthesis", "Send the AI summary and your notes (tab)",
+			if s.transcript then "granola.segmentOff" else "granola.segmentOn"),
+		button("transcript", "Full transcript", "mode=transcript", "Also send the full transcript (tab)",
+			if s.transcript then "granola.segmentOn" else "granola.segmentOff"),
 	}))
-	return ui.node("col", { key = "granola", role = "granola.panel" }, children),
-		ui.node("row", { key = "dock", role = "granola.dock" }, dock)
+	local dock: { Node } = {
+		ui.node("row", { key = "status", role = "granola.status" }, status),
+		key_hints(KEYS, "keys"),
+	}
+	if s.help then
+		table.insert(dock, key_hints(MORE_KEYS, "more"))
+	end
+	return { main = ui.col(main), dock = ui.node("col", { key = "dock", role = "granola.dock" }, dock) }
 end
 
 return View

@@ -1,99 +1,59 @@
 --!strict
--- Window half: the Granola panel (a canvas beside the focused pane), palette commands, and the
--- send-to-agent flow. Meetings are gathered with their summaries (and optionally transcripts) into
--- one Markdown document, which goes to an existing agent block or a new one in the focused
--- directory: inline when short, else as a file in the plugin's data directory that the prompt names.
--- Carly gets the same notes through the `recent` and `note` exports.
+-- Window half: everything the Granola block (host.luau) can't do itself. It keeps the API key in the
+-- keychain, talks to Granola, pastes meetings into the agent's composer and moves focus. The block
+-- asks through `tern-granola://VERB?pane=N&…` links, claimed here by `route.link`; answers go back as
+-- `granola` action events on the block's pane. Alt+G jumps to the block and back. Carly gets the
+-- notes through the `recent` and `note` exports.
 
 local api = require("./lib/api")
 local context = require("./lib/context")
-local view = require("./lib/view")
 
-local TITLE = "Granola"
-local ABOUT = "Recent Granola meetings. Preview summaries, gather meetings with ☐, and send them "
-	.. "(summaries, optionally transcripts) as context to an agent session."
+local KIND = "granola.meetings"
+local SCHEME = "tern-granola://"
 local SECRET = "api-key"
 
 local api_key: string? = nil
--- The pane the user last worked in, not the panel: the new agent's directory.
+-- The pane the user last worked in outside the block: where Esc returns, a new agent's directory.
 local last_pane: number? = nil
 -- The agent block the user last worked in: where gathered meetings go.
 local last_agent: number? = nil
-local panel_pane: number? = nil
 
-local function utc_offset(): number
-	local now = os.time()
-	return now - os.time(os.date("!*t", now) :: any)
-end
-
-local model: view.Model = {
-	key = "checking",
-	notes = {},
-	cursor = nil,
-	loading = false,
-	error = nil,
-	filter = nil,
-	expanded = {},
-	details = {},
-	detail_errors = {},
-	picked = {},
-	transcript = tern.kv.get("transcript") == true,
-	busy = nil,
-	now = os.time(),
-	offset = utc_offset(),
-}
+-- Meetings loaded so far (newest first), the next page's cursor, and fetched notes by id.
+local notes: { any } = {}
+local cursor: string? = nil
+local details: { [string]: any } = {}
+-- What the block has gathered, for Carly's context.
+local picked: { string } = {}
 
 local function trim(s: string): string
 	return (string.gsub(s, "^%s+", ""):gsub("%s+$", ""))
 end
 
-local function basename(path: string): string
-	return string.match(path, "([^/]+)/*$") or path
-end
-
--- ── Panel ───────────────────────────────────────────────────────────────────
-
-local function find_panel(cx: WindowCx): number?
-	if panel_pane and cx.session:pane(panel_pane) then
-		return panel_pane
-	end
-	panel_pane = nil
-	for _, c in cx.canvas:list() do
-		if c.owner == tern.plugin.id and c.title == TITLE and cx.session:pane(c.pane) then
-			panel_pane = c.pane
-			return c.pane
+local function block_pane(cx: WindowCx): number?
+	for _, p in cx.session:panes() do
+		if p.block == KIND then
+			return p.pane
 		end
 	end
 	return nil
 end
 
-local function redraw(cx: WindowCx)
-	local pane = find_panel(cx)
-	if pane == nil then
-		return
-	end
-	model.now = os.time()
-	local main, dock = view.render(model)
-	local ok, err = pcall(cx.canvas.set, cx.canvas, pane, { view = main, dock = dock })
-	if not ok then
-		-- A canvas just opened accepts updates once the window lists it.
-		tern.log.debug("granola: canvas update deferred", err)
-		tern.timer(100, function(cx2)
-			if cx2 then
-				redraw(cx2)
-			end
-		end)
-	end
+-- Sends an answer to the block in `pane`; a closed block just misses it.
+local function answer(cx: WindowCx, pane: number, kind: string, data: any)
+	pcall(cx.session.event, cx.session, pane, { ev = "action", act = "granola", kind = kind, data = tern.json.encode(data) })
 end
 
-local function fail(cx: WindowCx, msg: string)
-	model.busy = nil
-	if find_panel(cx) then
-		model.error = msg
-		redraw(cx)
-	else
-		cx:toast("error", "Granola", msg)
+local function send_state(cx: WindowCx, pane: number, extra: { [string]: any }?)
+	local data: { [string]: any } = {
+		key = if api_key then "ok" else "missing",
+		notes = tern.json.array(notes),
+		more = cursor ~= nil,
+		loading = false,
+	}
+	for k, v in extra or {} do
+		data[k] = v
 	end
+	answer(cx, pane, "state", data)
 end
 
 -- ── API key ─────────────────────────────────────────────────────────────────
@@ -112,8 +72,6 @@ local function ask_key(cx: WindowCx, after: ((key: string, cx: WindowCx) -> ())?
 				return
 			end
 			api_key = key
-			model.key = "ok"
-			model.error = nil
 			c:toast("success", "Granola key saved")
 			if after then
 				after(key, c)
@@ -122,8 +80,8 @@ local function ask_key(cx: WindowCx, after: ((key: string, cx: WindowCx) -> ())?
 	end)
 end
 
--- Runs `fn` with the API key, reading the keychain once and asking when there is none.
-local function with_key(cx: WindowCx, fn: (key: string, cx: WindowCx) -> ())
+-- Runs `fn` with the API key, reading the keychain once; nil `key` means there is none.
+local function with_key(cx: WindowCx, fn: (key: string?, cx: WindowCx) -> ())
 	if api_key then
 		fn(api_key, cx)
 		return
@@ -131,88 +89,98 @@ local function with_key(cx: WindowCx, fn: (key: string, cx: WindowCx) -> ())
 	tern.secrets.get(SECRET):next(function(value, err, cx2)
 		local c = (cx2 or cx) :: WindowCx
 		if err then
-			fail(c, "Couldn't read the keychain: " .. err)
-			return
+			c:toast("error", "Couldn't read the keychain", err)
 		end
 		if type(value) == "string" and value ~= "" then
 			api_key = value
-			model.key = "ok"
-			fn(value, c)
-		else
-			model.key = "missing"
-			redraw(c)
-			ask_key(c, fn)
 		end
+		fn(api_key, c)
 	end)
 end
 
--- ── Loading ─────────────────────────────────────────────────────────────────
+-- ── Requests ────────────────────────────────────────────────────────────────
 
-local function load(cx: WindowCx, more: boolean)
-	if model.loading then
-		return
-	end
+local function load(cx: WindowCx, pane: number, more: boolean)
 	with_key(cx, function(key, c)
-		model.loading = true
-		model.error = nil
-		redraw(c)
-		api.list(key, if more then model.cursor else nil, function(page, err, c2)
-			model.loading = false
+		if key == nil then
+			send_state(c, pane)
+			return
+		end
+		api.list(key, if more then cursor else nil, function(page, err, c2)
 			if err or page == nil then
-				model.error = err
 				if err and string.find(err, "401") then
-					model.key = "missing"
 					api_key = nil
 				end
-				redraw(c2)
+				send_state(c2, pane, { error = err })
 				return
 			end
 			if more then
 				for _, n in page.notes do
-					table.insert(model.notes, n)
+					table.insert(notes, n)
 				end
 			else
-				model.notes = page.notes
+				notes = page.notes
 			end
-			model.cursor = page.cursor
-			redraw(c2)
+			cursor = page.cursor
+			send_state(c2, pane)
 		end)
 	end)
 end
 
-local function has_transcript(note: any): boolean
-	return type(note) == "table" and type(note.transcript) == "table"
+local function detail(cx: WindowCx, pane: number, id: string)
+	if details[id] then
+		answer(cx, pane, "detail", { id = id, note = details[id] })
+		return
+	end
+	with_key(cx, function(key, c)
+		if key == nil then
+			return
+		end
+		api.note(key, id, false, function(note, err, c2)
+			if err or note == nil then
+				answer(c2, pane, "detail", { id = id, error = err or "Granola returned nothing" })
+				return
+			end
+			details[id] = note
+			answer(c2, pane, "detail", { id = id, note = note })
+		end)
+	end)
 end
 
--- Fetches the notes `ids` (with transcripts when the toggle says so), one at a time to stay well
--- under Granola's rate limit, reusing what previews already loaded.
-local function gather(cx: WindowCx, ids: { string }, done: (notes: { any }, cx: WindowCx) -> ())
+-- Fetches the notes `ids` (with transcripts when asked), one at a time to stay well under Granola's
+-- rate limit, reusing what previews already loaded.
+local function gather(cx: WindowCx, pane: number?, ids: { string }, transcript: boolean, done: (notes: { any }, cx: WindowCx) -> ())
 	with_key(cx, function(key, c)
-		local want_transcript = model.transcript
-		local notes: { any } = {}
+		if key == nil then
+			c:toast("error", "Granola has no API key yet")
+			return
+		end
+		local out: { any } = {}
 		local function step(i: number, sc: WindowCx)
 			if i > #ids then
-				model.busy = nil
-				redraw(sc)
-				done(notes, sc)
+				done(out, sc)
 				return
 			end
 			local id = ids[i]
-			local cached = model.details[id]
-			if cached and (not want_transcript or has_transcript(cached)) then
-				table.insert(notes, cached)
+			local cached = details[id]
+			if cached and (not transcript or type(cached.transcript) == "table") then
+				table.insert(out, cached)
 				step(i + 1, sc)
 				return
 			end
-			model.busy = string.format("Fetching %d of %d from Granola…", i, #ids)
-			redraw(sc)
-			api.note(key, id, want_transcript, function(note, err, c2)
+			if pane and #ids > 1 then
+				answer(sc, pane, "busy", { text = string.format("Fetching %d of %d…", i, #ids) })
+			end
+			api.note(key, id, transcript, function(note, err, c2)
 				if err or note == nil then
-					fail(c2, err or "Granola returned nothing")
+					if pane then
+						answer(c2, pane, "done", {})
+					end
+					c2:toast("error", "Granola", err or "Granola returned nothing")
 					return
 				end
-				model.details[id] = note
-				table.insert(notes, note)
+				details[id] = note
+				table.insert(out, note)
 				step(i + 1, c2)
 			end)
 		end
@@ -222,26 +190,18 @@ end
 
 -- ── Delivery to agents ──────────────────────────────────────────────────────
 
--- The directory a new agent starts in: the pane the user last worked in, else a terminal or agent
--- beside the panel, else home.
-local function focused_cwd(cx: WindowCx): string
+-- The directory a new agent starts in: the pane the user last worked in, else home.
+local function work_cwd(cx: WindowCx): string
 	local pane = if last_pane then cx.session:pane(last_pane) else nil
 	if pane and pane.cwd and pane.cwd ~= "" then
 		return pane.cwd
 	end
-	local panel = find_panel(cx)
-	local tab = if panel then cx.session:tab_of(panel) else nil
-	for _, p in cx.session:panes() do
-		if p.tab == tab and (p.kind == "terminal" or p.kind == "agent") and p.cwd and p.cwd ~= "" then
-			return p.cwd
-		end
-	end
 	return tern.getenv("HOME") or "~"
 end
 
--- The agent to attach to: the one you last worked in, else the newest agent in the panel's tab;
+-- The agent to attach to: the one you last worked in, else the newest agent in the block's tab;
 -- nil when there is none (a new one starts).
-local function target_agent(cx: WindowCx): number?
+local function target_agent(cx: WindowCx, near: number?): number?
 	local live: { [number]: boolean } = {}
 	for _, a in cx.agents:list() do
 		if a.state ~= "exited" then
@@ -251,8 +211,7 @@ local function target_agent(cx: WindowCx): number?
 	if last_agent and live[last_agent] and cx.session:pane(last_agent) then
 		return last_agent
 	end
-	local panel = find_panel(cx)
-	local tab = if panel then cx.session:tab_of(panel) else nil
+	local tab = if near then cx.session:tab_of(near) else nil
 	local best: number? = nil
 	for _, p in cx.session:panes() do
 		if live[p.pane] and p.tab == tab and (best == nil or p.pane > best) then
@@ -278,443 +237,207 @@ end
 -- Bracketed paste: the agent's composer takes the context as one paste and doesn't submit it.
 local PASTE_START, PASTE_END = "\27[200~", "\27[201~"
 
--- Puts the gathered meetings into the current agent's composer, ready for your question; with no
+-- Puts the meetings into the agent's composer, ready for your question, and focuses it; with no
 -- agent around, starts one in the directory you were working in.
-local function attach(cx: WindowCx, ids: { string })
-	if #ids == 0 then
-		return
-	end
-	gather(cx, ids, function(notes, c)
-		local doc = context.document(notes, { transcript = model.transcript })
+local function attach(cx: WindowCx, pane: number?, ids: { string }, transcript: boolean)
+	gather(cx, pane, ids, transcript, function(got, c)
+		local doc = context.document(got, { transcript = transcript })
 		local titles: { string } = {}
-		for _, n in notes do
+		for _, n in got do
 			table.insert(titles, context.title(n))
 		end
 		local ok, path = pcall(spill, doc, titles)
 		if not ok then
+			if pane then
+				answer(c, pane, "done", {})
+			end
 			c:toast("error", "Couldn't write the context file", tostring(path))
 			return
 		end
 		local text = context.attachment(doc, titles, path)
-		local what = if #notes == 1 then "“" .. titles[1] .. "”" else tostring(#notes) .. " meetings"
-		local how = if path then "as a file" elseif model.transcript then "with transcripts" else "as synthesis"
-		local pane = target_agent(c)
-		if pane == nil then
-			local cwd = focused_cwd(c)
+		local what = if #got == 1 then "“" .. titles[1] .. "”" else tostring(#got) .. " meetings"
+		local agent = target_agent(c, pane)
+		if agent == nil then
+			local cwd = work_cwd(c)
 			local started, err = pcall(c.agents.start, c.agents, {
 				prompt = text .. "\n\n" .. context.WAIT, cwd = cwd, how = "split",
 			})
-			if not started then
-				c:toast("error", "Couldn't start an agent", tostring(err))
-				return
+			if pane then
+				answer(c, pane, "done", { clear = started })
 			end
-			c:toast("success", "Started an agent with " .. what, cwd)
+			if started then
+				c:toast("success", "Started an agent with " .. what, cwd)
+			else
+				c:toast("error", "Couldn't start an agent", tostring(err))
+			end
 			return
 		end
-		c:run(pane, PASTE_START .. text .. PASTE_END)
-		pcall(c.layout.focus, c.layout, pane)
+		c:run(agent, PASTE_START .. text .. PASTE_END)
+		pcall(c.layout.focus, c.layout, agent)
+		if pane then
+			answer(c, pane, "done", { clear = true })
+		end
+		local how = if path then "as a file" elseif transcript then "with transcripts" else "as synthesis"
 		c:toast("success", "Added " .. what .. " " .. how, "Type your question and send")
 	end)
 end
 
-local function copy(cx: WindowCx, ids: { string })
-	gather(cx, ids, function(notes, c)
-		c:copy(context.document(notes, { transcript = model.transcript }))
-		c:toast("success", if #notes == 1 then "Copied 1 meeting" else "Copied " .. tostring(#notes) .. " meetings")
+local function copy(cx: WindowCx, ids: { string }, transcript: boolean)
+	gather(cx, nil, ids, transcript, function(got, c)
+		c:copy(context.document(got, { transcript = transcript }))
+		c:toast("success", if #got == 1 then "Copied 1 meeting" else "Copied " .. tostring(#got) .. " meetings")
 	end)
 end
 
--- ── Panel actions ───────────────────────────────────────────────────────────
-
-local function toggle_pick(id: string)
-	local idx = table.find(model.picked, id)
-	if idx then
-		table.remove(model.picked, idx)
-	else
-		table.insert(model.picked, id)
-	end
-end
-
-local function expand(cx: WindowCx, id: string)
-	model.expanded[id] = not model.expanded[id] or nil
-	redraw(cx)
-	if model.expanded[id] and model.details[id] == nil then
-		model.detail_errors[id] = nil
-		with_key(cx, function(key, _c)
-			api.note(key, id, false, function(note, err, c2)
-				if err then
-					model.detail_errors[id] = err
-				else
-					model.details[id] = note
-				end
-				redraw(c2)
-			end)
-		end)
-	end
-end
-
 local function open_web(cx: WindowCx, id: string)
-	local cached = model.details[id]
-	if cached and cached.web_url then
-		cx:open(cached.web_url)
+	if details[id] and details[id].web_url then
+		cx:open(details[id].web_url)
 		return
 	end
-	with_key(cx, function(key, _c)
+	with_key(cx, function(key, c)
+		if key == nil then
+			return
+		end
 		api.note(key, id, false, function(note, err, c2)
 			if err or note == nil or type(note.web_url) ~= "string" then
-				fail(c2, err or "This note has no web link")
+				c2:toast("error", "Granola", err or "This note has no web link")
 				return
 			end
-			model.details[id] = note
+			details[id] = note
 			c2:open(note.web_url)
 		end)
 	end)
 end
 
-local function filter(cx: WindowCx)
-	cx:prompt({ value = model.filter, placeholder = "Filter meetings by title or attendee", action = "filter", icon = "search" })
-		:next(function(value, _err, c)
-			if value == nil then
-				return
+-- Back to where you were before the block: the agent, else the last pane, else another pane in the
+-- block's tab (after a plugin reload nothing is remembered yet).
+local function go_back(cx: WindowCx)
+	local block = block_pane(cx)
+	local target = target_agent(cx, block)
+	if target == nil and last_pane and cx.session:pane(last_pane) then
+		target = last_pane
+	end
+	if target == nil and block then
+		local tab = cx.session:tab_of(block)
+		for _, p in cx.session:panes() do
+			if p.tab == tab and p.pane ~= block then
+				target = p.pane
+				break
 			end
-			local f = trim(value)
-			model.filter = if f == "" then nil else f
-			redraw(c :: WindowCx)
-		end)
-end
-
-local function open_panel(cx: WindowCx)
-	model.now = os.time()
-	local main, dock = view.render(model)
-	local pane, err = cx.canvas:open({ title = TITLE, about = ABOUT, view = main, dock = dock, how = "beside", focus = false })
-	if pane == nil then
-		cx:toast("error", "Couldn't open the Granola panel", err)
-		return
+		end
 	end
-	panel_pane = pane
-	if #model.notes == 0 then
-		load(cx, false)
+	if target then
+		pcall(cx.layout.focus, cx.layout, target)
 	end
 end
 
-local function toggle_panel(cx: WindowCx)
-	local pane = find_panel(cx)
-	if pane then
-		cx.layout:close(pane)
-		panel_pane = nil
-	else
-		open_panel(cx)
+local function split_ids(s: string?): { string }
+	local ids: { string } = {}
+	for id in string.gmatch(s or "", "[%w_]+") do
+		table.insert(ids, id)
 	end
+	return ids
 end
 
-tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
-	if ev.pane ~= find_panel(cx) then
+tern.route.link(function(link: LinkRequest, cx: WindowCx): RouteDecision?
+	if string.sub(link.url, 1, #SCHEME) ~= SCHEME then
 		return nil
 	end
-	local act, id = ev.act, ev.value
-	if act == "refresh" then
-		load(cx, false)
-	elseif act == "more" then
-		load(cx, true)
-	elseif act == "key" then
-		ask_key(cx, function(_key, c)
-			load(c, false)
-		end)
-	elseif act == "search" then
-		filter(cx)
-	elseif act == "clear-filter" then
-		model.filter = nil
-		redraw(cx)
-	elseif act == "mode" and (id == "synthesis" or id == "transcript") then
-		model.transcript = id == "transcript"
-		tern.kv.set("transcript", model.transcript)
-		redraw(cx)
-	elseif act == "pick" and id then
-		toggle_pick(id)
-		redraw(cx)
-	elseif act == "expand" and id then
-		expand(cx, id)
-	elseif act == "attach" and id then
-		attach(cx, { id })
-	elseif act == "copy" and id then
-		copy(cx, { id })
-	elseif act == "web" and id then
-		open_web(cx, id)
-	elseif act == "attach-picked" then
-		attach(cx, table.clone(model.picked))
-	elseif act == "copy-picked" then
-		copy(cx, table.clone(model.picked))
-	elseif act == "clear-picked" then
-		model.picked = {}
-		redraw(cx)
+	-- The scheme has a `-`, a pattern quantifier, so the verb is cut out by position.
+	local verb = string.match(string.sub(link.url, #SCHEME + 1), "^([%w-]+)") or ""
+	local q: { [string]: string } = {}
+	for k, v in string.gmatch(string.match(link.url, "%?(.*)$") or "", "([^&=]+)=([^&]*)") do
+		q[k] = v
 	end
-	return true
+	local pane = tonumber(q.pane) or link.pane
+	local transcript = q.transcript == "1"
+	if verb == "hello" then
+		picked = split_ids(q.ids)
+		if #notes > 0 and api_key then
+			send_state(cx, pane)
+		else
+			load(cx, pane, false)
+		end
+	elseif verb == "load" then
+		load(cx, pane, q.more == "1")
+	elseif verb == "detail" and q.id then
+		detail(cx, pane, q.id)
+	elseif verb == "attach" then
+		attach(cx, pane, split_ids(q.ids), transcript)
+	elseif verb == "copy" then
+		copy(cx, split_ids(q.ids), transcript)
+	elseif verb == "web" and q.id then
+		open_web(cx, q.id)
+	elseif verb == "picked" then
+		picked = split_ids(q.ids)
+	elseif verb == "key" then
+		ask_key(cx, function(_key, c)
+			load(c, pane, false)
+		end)
+	elseif verb == "back" then
+		go_back(cx)
+	end
+	return { handled = true }
 end)
 
--- ── Keyboard ────────────────────────────────────────────────────────────────
--- Everything the panel does is also a palette command, most behind the leader Alt+G followed by one
--- letter. (Tern's preset owns Ctrl+Shift+G, Hyprland setups often own Super+G, and Ctrl+Alt chords
--- didn't fire on Linux in testing.) The meetings picker (leader, M) is the keyboard version of the panel:
--- type to filter, ↵ on a meeting gathers it or releases it and reopens the picker, and the actions on
--- top add, switch mode, copy or clear without leaving the keyboard.
+-- ── Palette ─────────────────────────────────────────────────────────────────
 
-local LEADER = "alt+g"
-
--- Runs `fn` once the first page of meetings is loaded.
-local function with_notes(cx: WindowCx, fn: (cx: WindowCx) -> ())
-	if #model.notes > 0 then
-		fn(cx)
-		return
+-- Alt+G: into the meetings block (opening it beside you the first time), and from it back to the
+-- agent.
+local function toggle(cx: WindowCx)
+	local pane = block_pane(cx)
+	if pane and cx.session:focused() == pane then
+		go_back(cx)
+	elseif pane then
+		cx.layout:focus(pane)
+	else
+		cx:new_block(KIND, {}, "beside")
 	end
-	with_key(cx, function(key, c)
-		api.list(key, nil, function(page, err, c2)
-			if err or page == nil then
-				fail(c2, err or "Granola returned nothing")
-				return
-			end
-			model.notes, model.cursor = page.notes, page.cursor
-			redraw(c2)
-			fn(c2)
-		end)
-	end)
-end
-
-local function mode_label(): string
-	return if model.transcript then "Full transcript" else "Synthesis"
-end
-
-local function toggle_mode(cx: WindowCx)
-	model.transcript = not model.transcript
-	tern.kv.set("transcript", model.transcript)
-	redraw(cx)
-	cx:toast("info", "Granola: " .. mode_label())
-end
-
-local function clear_picked(cx: WindowCx)
-	model.picked = {}
-	redraw(cx)
-end
-
-local function meeting_items(): { PickItem }
-	local items: { PickItem } = {}
-	for _, n in model.notes do
-		local detail = context.when(n.created_at, os.time(), model.offset)
-		local d = model.details[n.id]
-		if d and type(d.attendees) == "table" and #d.attendees > 0 then
-			local names: { string } = {}
-			for i, u in d.attendees do
-				if i > 3 then
-					break
-				end
-				table.insert(names, u.name or u.email or "?")
-			end
-			detail ..= " · " .. table.concat(names, ", ")
-		end
-		table.insert(items, {
-			label = context.title(n), detail = detail, group = "Meetings", icon = "sparkle",
-			current = table.find(model.picked, n.id) ~= nil, id = n.id,
-		})
-	end
-	return items
-end
-
--- Picks one meeting and hands its id to `fn`.
-local function pick_meeting(cx: WindowCx, placeholder: string, action: string, fn: (id: string, cx: WindowCx) -> ())
-	with_notes(cx, function(c)
-		local items = meeting_items()
-		if #items == 0 then
-			c:toast("info", "No summarized Granola meetings yet")
-			return
-		end
-		c:pick({ items = items, placeholder = placeholder, icon = "sparkle", action = action }):next(function(item, _err, c2)
-			if item then
-				fn(item.id, c2 :: WindowCx)
-			end
-		end)
-	end)
-end
-
--- The keyboard panel: actions first, then every loaded meeting (✓ = gathered).
-local function hub(cx: WindowCx)
-	with_notes(cx, function(c)
-		local n = #model.picked
-		local items: { PickItem } = {}
-		if n > 0 then
-			table.insert(items, {
-				label = "Add " .. (if n == 1 then "1 gathered meeting" else tostring(n) .. " gathered meetings") .. " to the agent",
-				detail = mode_label(), group = "Actions", icon = "sparkle", act = "attach",
-			})
-		end
-		table.insert(items, {
-			label = "Mode: " .. mode_label(),
-			detail = "switch to " .. (if model.transcript then "Synthesis" else "Full transcript"),
-			group = "Actions", icon = "sparkle", act = "mode",
-		})
-		if n > 0 then
-			table.insert(items, { label = "Copy gathered as Markdown", group = "Actions", icon = "sparkle", act = "copy" })
-			table.insert(items, { label = "Clear gathered", group = "Actions", icon = "sparkle", act = "clear" })
-		end
-		if model.cursor then
-			table.insert(items, { label = "Load older meetings", group = "Actions", icon = "sparkle", act = "more" })
-		end
-		for _, item in meeting_items() do
-			table.insert(items, item)
-		end
-		c:pick({
-			items = items,
-			placeholder = if n > 0 then tostring(n) .. " gathered · ↵ gathers or releases a meeting" else "↵ gathers a meeting · type to filter",
-			icon = "sparkle",
-			action = "gather / run",
-		}):next(function(item, _err, c2)
-			local wcx = c2 :: WindowCx
-			if item == nil then
-				return
-			elseif item.id then
-				toggle_pick(item.id)
-				redraw(wcx)
-				hub(wcx)
-			elseif item.act == "attach" then
-				attach(wcx, table.clone(model.picked))
-			elseif item.act == "copy" then
-				copy(wcx, table.clone(model.picked))
-			elseif item.act == "mode" then
-				toggle_mode(wcx)
-				hub(wcx)
-			elseif item.act == "clear" then
-				clear_picked(wcx)
-				hub(wcx)
-			elseif item.act == "more" then
-				with_key(wcx, function(key, c3)
-					api.list(key, model.cursor, function(page, err, c4)
-						if err or page == nil then
-							fail(c4, err or "Granola returned nothing")
-							return
-						end
-						for _, note in page.notes do
-							table.insert(model.notes, note)
-						end
-						model.cursor = page.cursor
-						redraw(c4)
-						hub(c4)
-					end)
-				end)
-			end
-		end)
-	end)
-end
-
--- Opens the panel (if needed) with one meeting's preview expanded.
-local function preview(id: string, cx: WindowCx)
-	if find_panel(cx) == nil then
-		open_panel(cx)
-	end
-	if not model.expanded[id] then
-		expand(cx, id)
-	end
-end
-
-local function command(id: string, title: string, key: string?, run: (cx: WindowCx) -> ())
-	tern.command({ id = id, title = title, icon = "sparkle", keys = if key then { LEADER .. ">" .. key } else nil, run = run })
 end
 
 tern.command({
-	id = "panel",
-	title = "Granola: Show or hide meetings",
+	id = "meetings",
+	title = "Granola: Meetings (jump in and back)",
 	icon = "sparkle",
-	keys = { LEADER .. ">g", "cmd+alt+shift+g" },
-	run = toggle_panel,
+	keys = { "alt+g" },
+	run = toggle,
 })
-command("meetings", "Granola: Meetings (gather, add, switch mode)", "m", hub)
-command("attach", "Granola: Add a meeting to the agent", "a", function(cx)
-	pick_meeting(cx, "Add which meeting to the agent?", "add", function(id, c)
-		attach(c, { id })
-	end)
-end)
-command("attach-gathered", "Granola: Add gathered meetings to the agent", "enter", function(cx)
-	if #model.picked == 0 then
-		cx:toast("info", "Nothing gathered", "Alt+G M gathers meetings")
-		return
-	end
-	attach(cx, table.clone(model.picked))
-end)
-command("mode", "Granola: Switch Synthesis / Full transcript", "t", toggle_mode)
-command("preview", "Granola: Preview a meeting", "p", function(cx)
-	pick_meeting(cx, "Preview which meeting?", "preview", preview)
-end)
-command("copy", "Granola: Copy gathered meetings", "c", function(cx)
-	if #model.picked == 0 then
-		cx:toast("info", "Nothing gathered")
-		return
-	end
-	copy(cx, table.clone(model.picked))
-end)
-command("clear", "Granola: Clear gathered meetings", "x", clear_picked)
-command("filter", "Granola: Filter the panel", "f", filter)
-command("refresh", "Granola: Reload meetings", "r", function(cx)
-	load(cx, false)
-end)
-command("open", "Granola: Open a meeting in Granola", "o", function(cx)
-	pick_meeting(cx, "Open which meeting in Granola?", "open", function(id, c)
-		open_web(c, id)
-	end)
-end)
-command("key", "Granola: Set API key", nil, function(cx)
-	ask_key(cx, function(_key, c)
-		load(c, false)
-	end)
-end)
+
+tern.command({
+	id = "key",
+	title = "Granola: Set API key",
+	icon = "key",
+	run = function(cx)
+		ask_key(cx, function(_key, c)
+			local pane = block_pane(c)
+			if pane then
+				load(c, pane, false)
+			end
+		end)
+	end,
+})
 
 -- ── Window events ───────────────────────────────────────────────────────────
 
-tern.on("focus", function(ev: FocusEvent, cx: WindowCx)
-	if ev.pane ~= panel_pane then
-		last_pane = ev.pane
-		local info = cx.session:pane(ev.pane)
-		if info and info.kind == "agent" then
-			last_agent = ev.pane
-		end
-	end
-end)
-
--- Reads the key and adopts a panel left open by a restart. `window_start` covers a new window; a
--- plugin reload in a running window gets no `window_start`, so a timer runs it once as well.
-local started = false
-local function start(cx: WindowCx)
-	if started then
+local function remember(cx: WindowCx, pane: number)
+	local info = cx.session:pane(pane)
+	if info == nil or info.block == KIND then
 		return
 	end
-	started = true
-	local focused = cx.session:focused()
-	if focused and focused ~= find_panel(cx) then
-		last_pane = focused
-		local info = cx.session:pane(focused)
-		if info and info.kind == "agent" then
-			last_agent = focused
-		end
+	last_pane = pane
+	if info.kind == "agent" then
+		last_agent = pane
 	end
-	tern.secrets.get(SECRET):next(function(value, _err, cx2)
-		if type(value) == "string" and value ~= "" then
-			api_key = value
-			model.key = "ok"
-		else
-			model.key = "missing"
-		end
-		local c = cx2 :: WindowCx
-		-- A panel left open by a reload or restart is adopted and filled.
-		if c and find_panel(c) then
-			if model.key == "ok" then
-				load(c, false)
-			else
-				redraw(c)
-			end
-		end
-	end)
 end
 
-tern.on("window_start", start)
-tern.timer(0, function(cx)
-	if cx then
-		start(cx)
+tern.on("focus", function(ev: FocusEvent, cx: WindowCx)
+	remember(cx, ev.pane)
+end)
+
+tern.on("window_start", function(cx: WindowCx)
+	local focused = cx.session:focused()
+	if focused then
+		remember(cx, focused)
 	end
 end)
 
@@ -774,18 +497,18 @@ tern.carly.export("note", {
 	return call:wait(60000)
 end)
 
--- Tells Carly what the panel has gathered, so “send these to …” has a referent.
+-- Tells Carly what the block has gathered, so “add these to …” has a referent.
 tern.carly.context(function(_cx)
-	if #model.picked == 0 then
+	if #picked == 0 then
 		return nil
 	end
 	local titles: { string } = {}
-	for _, id in model.picked do
-		for _, n in model.notes do
+	for _, id in picked do
+		for _, n in notes do
 			if n.id == id then
 				table.insert(titles, context.title(n))
 			end
 		end
 	end
-	return "Granola meetings gathered in the panel: " .. table.concat(titles, "; ")
+	return if #titles > 0 then "Granola meetings gathered in the panel: " .. table.concat(titles, "; ") else nil
 end)
