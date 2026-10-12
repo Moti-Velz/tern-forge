@@ -18,13 +18,29 @@ You need a Granola **personal API key**, which requires a Business or Enterprise
 
 ## Use
 
-| Palette command | What it does |
-| --- | --- |
-| **Granola: Show or hide meetings** (`Super+Alt+Shift+G`) | Toggles the panel beside the focused pane |
-| **Granola: Add a meeting to the agent** | Picks one recent meeting and adds it, no panel needed |
-| **Granola: Set API key** | Stores or replaces the key |
+### Keyboard
 
-In the panel:
+Everything can be done from the keyboard. Press the leader **Alt+G**, then one key:
+
+| Keys | Palette command | What it does |
+| --- | --- | --- |
+| `Alt+G` `M` | **Granola: Meetings** | Opens a picker version of the panel. Type to filter. `↵` on a meeting gathers it or releases it (✓) and reopens the picker. The actions at the top add, switch mode, copy, clear or load older meetings |
+| `Alt+G` `↵` | **Granola: Add gathered meetings to the agent** | Puts what you gathered into the agent's composer |
+| `Alt+G` `A` | **Granola: Add a meeting to the agent** | Picks one meeting and adds it right away |
+| `Alt+G` `T` | **Granola: Switch Synthesis / Full transcript** | Toggles what goes along |
+| `Alt+G` `G` | **Granola: Show or hide meetings** | Toggles the panel (also `Super+Alt+Shift+G` where the window manager doesn't take it) |
+| `Alt+G` `P` | **Granola: Preview a meeting** | Opens the panel with that meeting's summary expanded |
+| `Alt+G` `C` / `X` | **Granola: Copy / Clear gathered meetings** | Copies them as Markdown, or forgets them |
+| `Alt+G` `F` / `R` | **Granola: Filter the panel / Reload meetings** | |
+| `Alt+G` `O` | **Granola: Open a meeting in Granola** | Opens its web page |
+| — | **Granola: Set API key** | Stores or replaces the key |
+
+Your gathered meetings and mode are shared by the panel and the picker, so you can mix mouse and keyboard.
+The leader is Alt+G because Tern's preset uses Ctrl+Shift+G, many Hyprland setups use Super+G, and
+Ctrl+Alt chords didn't fire in testing on Linux. To change any of these, rebind
+`plugin.granola.<command>` in Tern's keybinds.
+
+### Mouse
 
 - **Click a title** to preview attendees and the AI summary, with **Add to agent**, **Copy**
   (as Markdown) and **Open in Granola**.

@@ -192,7 +192,7 @@ function View.render(m: Model): (Node, Node)
 		table.insert(dock, button("copy", "Copy", "copy-picked", "Copy the gathered meetings as Markdown"))
 		table.insert(dock, button("clear", "Clear", "clear-picked", "Forget the gathered meetings"))
 	else
-		table.insert(dock, text("hint", "☐ gathers meetings for the agent", "granola.muted", { grow = 1 }))
+		table.insert(dock, text("hint", "☐ gathers · Alt+G M from the keyboard", "granola.muted", { grow = 1 }))
 	end
 	-- What goes along: the AI synthesis, or the synthesis plus the full transcript. Either becomes a
 	-- local file once it is too long to paste.

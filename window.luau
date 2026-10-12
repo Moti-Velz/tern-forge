@@ -451,71 +451,218 @@ tern.on("canvas_action", function(ev: CanvasAction, cx: WindowCx)
 	return true
 end)
 
--- ── Palette ─────────────────────────────────────────────────────────────────
+-- ── Keyboard ────────────────────────────────────────────────────────────────
+-- Everything the panel does is also a palette command, most behind the leader Alt+G followed by one
+-- letter. (Tern's preset owns Ctrl+Shift+G, Hyprland setups often own Super+G, and Ctrl+Alt chords
+-- didn't fire on Linux in testing.) The meetings picker (leader, M) is the keyboard version of the panel:
+-- type to filter, ↵ on a meeting gathers it or releases it and reopens the picker, and the actions on
+-- top add, switch mode, copy or clear without leaving the keyboard.
+
+local LEADER = "alt+g"
+
+-- Runs `fn` once the first page of meetings is loaded.
+local function with_notes(cx: WindowCx, fn: (cx: WindowCx) -> ())
+	if #model.notes > 0 then
+		fn(cx)
+		return
+	end
+	with_key(cx, function(key, c)
+		api.list(key, nil, function(page, err, c2)
+			if err or page == nil then
+				fail(c2, err or "Granola returned nothing")
+				return
+			end
+			model.notes, model.cursor = page.notes, page.cursor
+			redraw(c2)
+			fn(c2)
+		end)
+	end)
+end
+
+local function mode_label(): string
+	return if model.transcript then "Full transcript" else "Synthesis"
+end
+
+local function toggle_mode(cx: WindowCx)
+	model.transcript = not model.transcript
+	tern.kv.set("transcript", model.transcript)
+	redraw(cx)
+	cx:toast("info", "Granola: " .. mode_label())
+end
+
+local function clear_picked(cx: WindowCx)
+	model.picked = {}
+	redraw(cx)
+end
+
+local function meeting_items(): { PickItem }
+	local items: { PickItem } = {}
+	for _, n in model.notes do
+		local detail = context.when(n.created_at, os.time(), model.offset)
+		local d = model.details[n.id]
+		if d and type(d.attendees) == "table" and #d.attendees > 0 then
+			local names: { string } = {}
+			for i, u in d.attendees do
+				if i > 3 then
+					break
+				end
+				table.insert(names, u.name or u.email or "?")
+			end
+			detail ..= " · " .. table.concat(names, ", ")
+		end
+		table.insert(items, {
+			label = context.title(n), detail = detail, group = "Meetings", icon = "sparkle",
+			current = table.find(model.picked, n.id) ~= nil, id = n.id,
+		})
+	end
+	return items
+end
+
+-- Picks one meeting and hands its id to `fn`.
+local function pick_meeting(cx: WindowCx, placeholder: string, action: string, fn: (id: string, cx: WindowCx) -> ())
+	with_notes(cx, function(c)
+		local items = meeting_items()
+		if #items == 0 then
+			c:toast("info", "No summarized Granola meetings yet")
+			return
+		end
+		c:pick({ items = items, placeholder = placeholder, icon = "sparkle", action = action }):next(function(item, _err, c2)
+			if item then
+				fn(item.id, c2 :: WindowCx)
+			end
+		end)
+	end)
+end
+
+-- The keyboard panel: actions first, then every loaded meeting (✓ = gathered).
+local function hub(cx: WindowCx)
+	with_notes(cx, function(c)
+		local n = #model.picked
+		local items: { PickItem } = {}
+		if n > 0 then
+			table.insert(items, {
+				label = "Add " .. (if n == 1 then "1 gathered meeting" else tostring(n) .. " gathered meetings") .. " to the agent",
+				detail = mode_label(), group = "Actions", icon = "sparkle", act = "attach",
+			})
+		end
+		table.insert(items, {
+			label = "Mode: " .. mode_label(),
+			detail = "switch to " .. (if model.transcript then "Synthesis" else "Full transcript"),
+			group = "Actions", icon = "sparkle", act = "mode",
+		})
+		if n > 0 then
+			table.insert(items, { label = "Copy gathered as Markdown", group = "Actions", icon = "sparkle", act = "copy" })
+			table.insert(items, { label = "Clear gathered", group = "Actions", icon = "sparkle", act = "clear" })
+		end
+		if model.cursor then
+			table.insert(items, { label = "Load older meetings", group = "Actions", icon = "sparkle", act = "more" })
+		end
+		for _, item in meeting_items() do
+			table.insert(items, item)
+		end
+		c:pick({
+			items = items,
+			placeholder = if n > 0 then tostring(n) .. " gathered · ↵ gathers or releases a meeting" else "↵ gathers a meeting · type to filter",
+			icon = "sparkle",
+			action = "gather / run",
+		}):next(function(item, _err, c2)
+			local wcx = c2 :: WindowCx
+			if item == nil then
+				return
+			elseif item.id then
+				toggle_pick(item.id)
+				redraw(wcx)
+				hub(wcx)
+			elseif item.act == "attach" then
+				attach(wcx, table.clone(model.picked))
+			elseif item.act == "copy" then
+				copy(wcx, table.clone(model.picked))
+			elseif item.act == "mode" then
+				toggle_mode(wcx)
+				hub(wcx)
+			elseif item.act == "clear" then
+				clear_picked(wcx)
+				hub(wcx)
+			elseif item.act == "more" then
+				with_key(wcx, function(key, c3)
+					api.list(key, model.cursor, function(page, err, c4)
+						if err or page == nil then
+							fail(c4, err or "Granola returned nothing")
+							return
+						end
+						for _, note in page.notes do
+							table.insert(model.notes, note)
+						end
+						model.cursor = page.cursor
+						redraw(c4)
+						hub(c4)
+					end)
+				end)
+			end
+		end)
+	end)
+end
+
+-- Opens the panel (if needed) with one meeting's preview expanded.
+local function preview(id: string, cx: WindowCx)
+	if find_panel(cx) == nil then
+		open_panel(cx)
+	end
+	if not model.expanded[id] then
+		expand(cx, id)
+	end
+end
+
+local function command(id: string, title: string, key: string?, run: (cx: WindowCx) -> ())
+	tern.command({ id = id, title = title, icon = "sparkle", keys = if key then { LEADER .. ">" .. key } else nil, run = run })
+end
 
 tern.command({
 	id = "panel",
 	title = "Granola: Show or hide meetings",
 	icon = "sparkle",
-	keys = { "cmd+alt+shift+g" },
+	keys = { LEADER .. ">g", "cmd+alt+shift+g" },
 	run = toggle_panel,
 })
-
-tern.command({
-	id = "key",
-	title = "Granola: Set API key",
-	icon = "key",
-	run = function(cx)
-		ask_key(cx, function(_key, c)
-			load(c, false)
-		end)
-	end,
-})
-
--- Picks one recent meeting from the palette and adds it to the agent, without opening the panel.
-tern.command({
-	id = "attach",
-	title = "Granola: Add a meeting to the agent",
-	icon = "sparkle",
-	run = function(cx)
-		with_key(cx, function(key, c)
-			local function choose(pc: WindowCx)
-				local items: { PickItem } = {}
-				for _, n in model.notes do
-					table.insert(items, {
-						label = context.title(n),
-						detail = context.when(n.created_at, os.time(), model.offset),
-						icon = "sparkle",
-						id = n.id,
-					})
-				end
-				if #items == 0 then
-					pc:toast("info", "No summarized Granola meetings yet")
-					return
-				end
-				pc:pick({ items = items, placeholder = "Add which meeting to the agent?", icon = "sparkle", action = "add" })
-					:next(function(item, _err, c2)
-						if item then
-							attach(c2 :: WindowCx, { item.id })
-						end
-					end)
-			end
-			if #model.notes > 0 then
-				choose(c)
-				return
-			end
-			api.list(key, nil, function(page, err, c2)
-				if err or page == nil then
-					fail(c2, err or "Granola returned nothing")
-					return
-				end
-				model.notes, model.cursor = page.notes, page.cursor
-				redraw(c2)
-				choose(c2)
-			end)
-		end)
-	end,
-})
+command("meetings", "Granola: Meetings (gather, add, switch mode)", "m", hub)
+command("attach", "Granola: Add a meeting to the agent", "a", function(cx)
+	pick_meeting(cx, "Add which meeting to the agent?", "add", function(id, c)
+		attach(c, { id })
+	end)
+end)
+command("attach-gathered", "Granola: Add gathered meetings to the agent", "enter", function(cx)
+	if #model.picked == 0 then
+		cx:toast("info", "Nothing gathered", "Alt+G M gathers meetings")
+		return
+	end
+	attach(cx, table.clone(model.picked))
+end)
+command("mode", "Granola: Switch Synthesis / Full transcript", "t", toggle_mode)
+command("preview", "Granola: Preview a meeting", "p", function(cx)
+	pick_meeting(cx, "Preview which meeting?", "preview", preview)
+end)
+command("copy", "Granola: Copy gathered meetings", "c", function(cx)
+	if #model.picked == 0 then
+		cx:toast("info", "Nothing gathered")
+		return
+	end
+	copy(cx, table.clone(model.picked))
+end)
+command("clear", "Granola: Clear gathered meetings", "x", clear_picked)
+command("filter", "Granola: Filter the panel", "f", filter)
+command("refresh", "Granola: Reload meetings", "r", function(cx)
+	load(cx, false)
+end)
+command("open", "Granola: Open a meeting in Granola", "o", function(cx)
+	pick_meeting(cx, "Open which meeting in Granola?", "open", function(id, c)
+		open_web(c, id)
+	end)
+end)
+command("key", "Granola: Set API key", nil, function(cx)
+	ask_key(cx, function(_key, c)
+		load(c, false)
+	end)
+end)
 
 -- ── Window events ───────────────────────────────────────────────────────────
 
