@@ -10,7 +10,8 @@ local MODES = {
 	create = {
 		heading = "New worktree", submit = "Create worktree", fields = { "branch", "name" },
 		help = function(state)
-			return state.project .. " · New branch from " .. state.base .. ". Worktrunk hooks will run."
+			local note = if state.note ~= "" then " " .. state.note else ""
+			return state.project .. " · New branch from " .. state.base .. "." .. note
 		end,
 	},
 	rename = {
@@ -82,7 +83,7 @@ tern.block.define("form", {
 		local mode = if MODES[args[2]] then args[2] else "create"
 		local state = {
 			token = args[1] or "", mode = mode, project = args[3] or "",
-			base = args[4] or "master",
+			base = args[4] or "master", note = args[5] or "",
 			focus = MODES[mode].fields[1],
 			submitted = false, cancelled = false, focusScheduled = false,
 		}

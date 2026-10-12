@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.1.0 (2026-10-12)
+
+Worktrunk is now optional. Each project uses one of three worktree backends, picked automatically: Orca, Worktrunk or plain Git.
+
+### Added
+
+- **Orca backend.** When Orca's CLI is found and Orca has the project registered, worktrees are created and removed through Orca, so they show in Orca's app. Orca picks the directory and branch name and runs its own setup.
+- **Plain Git backend.** Without Orca or Worktrunk, worktrees are created with `git worktree add` beside the primary checkout, and the repo's `orca.yaml` setup and archive scripts run.
+- **Add project from Orca.** A palette command lists Orca's registered repositories that aren't in Projects yet. It appears only when Orca's CLI is found.
+- **Orca details on rows.** For Orca-registered projects, the hover shows Orca's board status and comment, Orca's display name is used when you haven't named the row, and Orca's linked Linear issue can supply the ticket badge when the branch has no ticket id.
+- **Linux.** The panel works on Linux (tested on Wayland with Tern 0.8.3). The folder picker uses zenity, else kdialog, else a typed path prompt (`~` expands); cancel is silent.
+- **Clearer create form.** The New worktree form says what will run.
+
+### Changed
+
+- **Worktrunk is optional.** Each project uses Orca when available, then Worktrunk when `wt` is on PATH, then plain Git. The choice is rechecked at most once a minute and on ↻.
+- **Listing reads git directly** for the Git and Orca backends. Worktrunk still uses `wt list`. Bare and prunable worktrees are skipped.
+- **Only Orca may delete a branch.** Worktrunk and plain Git always keep it; Orca may delete it when it can prove it merged, under its own policy.
+- **Tests cover every backend.** Removal-safety tests run for plain Git and, when `wt` is installed, for Worktrunk.
+
+### Upgrading
+
+Nothing to do. If Orca's CLI is installed and has a project registered, new worktrees for that project go through Orca. Other projects use Worktrunk when `wt` is on PATH, and plain Git otherwise.
+
+### Trade-offs
+
+The Orca backend needs Orca running. A project registered in Orca while Orca is closed falls back to Worktrunk or plain Git, and Orca then hides those worktrees as external.
+
 ## 2.0.0 (2026-10-09)
 
 The Projects panel is now one panel per window that follows you, instead of one panel per worktree session.

@@ -91,6 +91,9 @@ local function details(worktree, branch)
 	end
 	local pr = worktree.pr and PR_STATES[worktree.pr.state]
 	if pr then table.insert(lines, "PR #" .. tostring(worktree.pr.number) .. " · " .. pr.label) end
+	local orca = worktree.orca
+	if orca and orca.status then table.insert(lines, "Orca: " .. string.gsub(orca.status, "-", " ")) end
+	if orca and orca.comment then table.insert(lines, "“" .. orca.comment .. "”") end
 	if worktree.session then
 		local tabs = #(worktree.tabs or {})
 		local agent = if worktree.agent == "waiting" then " · agent waiting for you"

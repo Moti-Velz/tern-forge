@@ -18,13 +18,13 @@ Running five agents on five branches means five checkouts, a pile of terminals, 
 - **Every worktree gets its own Tern session.** Its tabs, shells and agents live there. Switching branches is one click, and nothing bleeds between them.
 - **You can see what every agent is doing.** A pulsing dot means an agent is working; a blue dot means one is waiting for you.
 - **PRs and tickets sit on the row.** GitHub PR state (draft, open, merged, closed) and the Linear ticket, both one click away.
-- **Worktrees come and go safely.** Creation and deletion run through [Worktrunk](https://worktrunk.dev) in the background, with your hooks and approvals intact.
+- **Worktrees come and go safely.** Creation and deletion run in the background through Orca, [Worktrunk](https://worktrunk.dev) or plain Git, whichever the project uses, with your hooks and approvals intact.
 - **Agents can start work for you.** Tell Tern's assistant *"Create an overseer worktree for ENG-123"* and you get a branch, a session and an [omp](https://omp.sh) agent already reading the ticket.
 - **PRs can be understood at a glance.** **Visualize PR** turns a pull request into a diagram-first outline, without touching GitHub.
 
 ## The panel
 
-The panel stays with you: it sits on the left of whichever tab you're looking at, across every session, and keeps the width you give it. Each project is a local Git repository. Under it, every worktree is a row, and under each row are its open tabs. Click a tab to jump straight to it. Hover a row for its branch, path, line counts, ahead/behind and PR.
+The panel stays with you: it sits on the left of whichever tab you're looking at, across every session, and keeps the width you give it. Each project is a local Git repository. Under it, every worktree is a row, and under each row are its open tabs. Click a tab to jump straight to it. Hover a row for its branch, path, line counts, ahead/behind and PR. For projects registered in Orca, the hover also shows Orca's board status and comment; Orca's display name is used when you haven't named the row, and the ticket badge can come from Orca's linked Linear issue when the branch name has no ticket id.
 
 <table>
 <tr>
@@ -39,7 +39,7 @@ The panel stays with you: it sits on the left of whichever tab you're looking at
 | ○ hollow | No session yet; click to open one |
 | **✱** amber | Uncommitted changes |
 | **conflicts** | A merge or rebase is stuck |
-| Linear logo | The branch names a ticket (`feat/ENG-123-…`) |
+| Linear logo | The branch names a ticket (`feat/ENG-123-…`), or Orca links one |
 | PR icon | Draft, open, merged or closed PR |
 | 🧊 | Parked in the Ice Box |
 
@@ -49,12 +49,15 @@ The panel stays with you: it sits on the left of whichever tab you're looking at
 
 ## Install
 
-You need macOS and:
+You need macOS or Linux and:
 
 | | Required for | |
 |---|---|---|
-| [Tern](https://docs.stencil.so/tern/) desktop | everything | tested with 0.6.2 |
-| [Worktrunk](https://worktrunk.dev) (`wt`), Git, Bash | everything | tested with wt 0.40.0 |
+| [Tern](https://docs.stencil.so/tern/) desktop | everything | tested with 0.6.2 on macOS, 0.8.3 on Linux |
+| Git, Bash | everything | |
+| [Worktrunk](https://worktrunk.dev) (`wt`) | worktrees, when Orca isn't used | optional; tested with wt 0.40.0 |
+| Orca (`orca-ide` CLI) | worktrees in projects Orca has registered | optional |
+| `zenity` or `kdialog` (Linux) | the folder picker | optional |
 | [GitHub CLI](https://cli.github.com) (`gh`), signed in | PR badges, Visualize PR | optional |
 | [Linear CLI](https://github.com/schpet/linear-cli) (`linear`), signed in | ticket links | optional |
 | [omp](https://omp.sh) | ticket agents, Visualize PR | optional |
@@ -67,12 +70,14 @@ cd overseer
 
 Linking reloads the plugin whenever the source changes. Use `tern plugin install "$PWD"` instead if you'd rather have a frozen copy.
 
+On Linux, use the `tern` binary from your Tern install in place of the macOS path.
+
 ## Use it
 
 1. **Show Projects:** <kbd>⌘</kbd><kbd>⌥</kbd><kbd>⇧</kbd><kbd>P</kbd>, or **Show or hide Projects** in the command palette. Press it again while the panel has focus to hide it.
-2. **Add a repo:** **+** in the header opens the folder picker.
+2. **Add a repo:** **+** in the header opens the folder picker. With Orca installed, **Add project from Orca** in the command palette lists Orca's registered repositories that aren't in Projects yet.
 3. **Open a worktree:** click its row. Its session opens, and the panel comes with it.
-4. **New worktree:** **+** next to a project. Type a branch name (and, if you like, a friendly display name). Setup runs in a background **Create** tab, and a notification tells you when it's ready.
+4. **New worktree:** **+** next to a project. Type a branch name (and, if you like, a friendly display name). The form says what will run: Orca's setup, Worktrunk hooks, the `orca.yaml` setup script, or nothing. Creation runs in the background, and a notification tells you when it's ready.
 5. **Everything else is a right-click away:**
 
 <img src="docs/images/context-menu.png" alt="Right-click menu on a worktree" width="420">
@@ -81,7 +86,7 @@ Linking reloads the plugin whenever the source changes. Use `tern plugin install
 - **Rename** changes the row's label (the branch stays as it is)
 - **Add to Ice Box** parks a worktree at the bottom; 🧊 in the header hides or shows parked ones
 - **Close session** stops its programs and closes its tabs (the files stay)
-- **Delete worktree** runs `wt remove`. It refuses if there are uncommitted changes and always keeps the branch.
+- **Delete worktree** removes it with the project's backend. It refuses if there are uncommitted changes. Worktrunk and plain Git always keep the branch; Orca may delete it when it can prove it's merged, under its own policy.
 - On a project: **Change base branch** and **Set Linear workspace**
 
 ### Start work from a ticket
@@ -90,7 +95,7 @@ Ask Tern's assistant, Carly:
 
 > Create an overseer worktree for ENG-123
 
-Overseer creates `feature/ENG-123` from the project's base branch and opens its session. Then it starts omp with:
+Overseer creates `feature/ENG-123` from the project's base branch and opens its session. (With Orca, Orca names the branch from its own branch prefix setting.) Then it starts omp with:
 
 > *Please read ticket ENG-123 to understand your task and ask any questions you have before we start*
 
@@ -110,8 +115,12 @@ It's **read-only by construction**: omp runs with only read/grep/glob tools and 
 flowchart LR
     you(["You"]) --> panel["Projects panel"]
     carly(["Carly"]) -- "ticket_worktree()" --> panel
+    panel -- "orca-ide worktree create / rm" --> orca["Orca"]
     panel -- "wt switch --create / wt remove" --> wt["Worktrunk"]
-    wt --> trees[("git worktrees")]
+    panel -- "git worktree add / remove" --> plain["Plain Git"]
+    orca --> trees[("git worktrees")]
+    wt --> trees
+    plain --> trees
     panel -- "one session per worktree" --> sessions["Tern sessions"]
     sessions --> agents["omp · claude · codex · …"]
     panel -. "gh pr list" .-> gh["GitHub"]
@@ -119,7 +128,10 @@ flowchart LR
     panel -. "gh pr diff → omp (read-only)" .-> outline["PR outline canvas"]
 ```
 
-- **Worktrunk owns the worktrees.** Overseer calls `wt` and never passes `--yes`, `--no-hooks` or force flags. Your hooks and approval prompts run in a visible tab.
+- **A backend owns each project's worktrees.** Overseer picks one per project, automatically: Orca when its CLI (`orca-ide`, or `orca` on macOS only, or `$ORCA_CLI_COMMAND`) is found and `repo show --repo path:<project>` succeeds; otherwise Worktrunk when `wt` is on PATH; otherwise plain Git. The choice is rechecked at most once a minute and on ↻.
+- **Worktrunk owns its worktrees.** Overseer calls `wt` and never passes `--yes`, `--no-hooks` or force flags. Your hooks and approval prompts run in a visible tab.
+- **Orca owns its worktrees.** Worktrees it creates show in Orca's app, and Orca runs its own setup and archive hooks.
+- **Plain Git is the fallback.** It uses `git worktree add` and `git worktree remove`, and runs the repo's `orca.yaml` setup and archive scripts.
 - **Tern owns the sessions.** Overseer remembers which session belongs to which worktree and switches between them.
 - **The panel follows you.** Tern plugins can't pin a sidebar to the window, so Overseer keeps one Projects panel per window and moves it into whichever tab you're on.
 - **Everything else is a read.** PR badges, ticket links, agent status and change counts come from `gh`, `linear`, `git` and Tern's own agent state.
@@ -127,7 +139,8 @@ flowchart LR
 ## Safety
 
 - Creation never fetches, pulls, or checks out anything in your primary checkout.
-- Deletion rechecks the repository, branch and cleanliness right before it runs. It never deletes a branch. The primary checkout can't be deleted.
+- Deletion rechecks the repository, branch and cleanliness right before it runs. Worktrunk and plain Git never delete a branch. Orca may delete one when it can prove it merged, under its own policy. The primary checkout can't be deleted.
+- A backend's archive step runs before removal: the `orca.yaml` `scripts.archive` for plain Git, Orca's archive hook for Orca. If it fails, removal stops.
 - Ignored files are removed with a deleted worktree's directory, so copy out anything you need first.
 - Branch names and paths are passed as arguments, never as shell text.
 
@@ -164,14 +177,14 @@ When debugging an overrun, add temporary `tern.log.warn(string.format("PROBE …
 | File | What lives there |
 |---|---|
 | `window.luau` | Project registry, model building (`model`), drawing (`draw`/`redraw`), the following panel (`slot`, `pin`, `follow`, `togglePanel`), session binding (`ensureSession`, `openWorktree`), forms swapped into the panel's slot, background jobs (`launchCreation`, `checkJobs`), ticket links (`ticketOf`, `ticketFor`), Linear workspace lookup, Visualize PR canvases, the Carly export, hooks and the 750 ms `tick`. |
-| `worktrunk.luau` | Every external command: `wt list`, validation, the creation and removal command lines, `git` status, `gh pr list`/`gh pr view`/`gh pr diff`, `linear auth whoami`. Commands are argv arrays; `find_executable` checks Homebrew, `/usr/local/bin`, `~/.bun/bin` and `~/.local/bin`. |
+| `worktrunk.luau` | Every external command: backend selection per project (Orca, Worktrunk or plain Git), `wt list`, the Orca CLI calls (repository lookup, `worktree create`, `worktree rm`, and the list behind Add project from Orca), the Worktrunk creation and removal command lines, `git` status and worktree listing, `gh pr list`/`gh pr view`/`gh pr diff`, `linear auth whoami`. Commands are argv arrays; `find_executable` checks Homebrew, `/usr/local/bin`, `~/.bun/bin` and `~/.local/bin`. |
 | `visualize.luau` | Visualize PR: prompt, read-only omp invocation, output extraction, cache. |
 | `view.luau` | Pure render: model → Tern UI node tree (rows, badges, tab rows, confirmations, menus). |
-| `worktree-operation.sh` | The helper that runs `wt switch --create` / `wt remove` in a visible terminal and writes an atomic completion receipt. |
+| `worktree-operation.sh` | The helper that runs `wt switch --create` / `wt remove` in a visible terminal, or plain Git's `git worktree add` / `remove` with the `orca.yaml` setup and archive scripts, and writes an atomic completion receipt. |
 | `host.luau`, `input.luau` | The native form block and its text input. |
 | `styles.css`, `icons.css` | Panel styles. `icons.css` is **generated** by `icons/generate-css.py` (plugin stylesheets can't load files, so icons are embedded as data URIs). |
 | `skills/visual-pr/` | HumanLayer's visual-pr skill, vendored unchanged (MIT). |
-| `tests/test_worktree_operation.py` | Real Git/Worktrunk tests for the helper. |
+| `tests/test_worktree_operation.py` | Real Git and Worktrunk tests for the helper: shared removal-safety tests for both backends (Worktrunk skipped without `wt`), plus Git-only tests for placement, existing-path refusal, and the setup and archive scripts. |
 
 ### State
 
@@ -192,7 +205,7 @@ In-memory only: the per-project `cache` (worktrees, PRs, loading/error flags), `
 
 ### Flows
 
-**Refresh.** `refresh` runs `wt list --format=json` per project, then `refreshPullRequests` (one `gh pr list` per GitHub project, at most every 2 minutes, immediately after ↻ or a worktree set change). An open panel refreshes every 15 s from `tick`.
+**Refresh.** `refresh` lists each project's worktrees with its backend: `wt list --format=json` for Worktrunk, and for Git and Orca projects `git worktree list --porcelain -z`, `git status --porcelain=v2 --branch -z`, `git diff --shortstat HEAD` and `git rev-list --left-right --count <base>...HEAD`, skipping bare and prunable worktrees. Then `refreshPullRequests` (one `gh pr list` per GitHub project, at most every 2 minutes, immediately after ↻ or a worktree set change). An open panel refreshes every 15 s from `tick`.
 
 **The following panel.** Tern panes belong to one tab, and plugins can't add a window-level sidebar, so the window keeps exactly one Projects slot and moves it into whichever tab is shown, left of everything and full height. `slot` finds it: the navigator canvas or a form shown in its place, adopting what a reload left open and closing any extra. `pin` moves it with `move_to_tab` (or `unpark`) then `move(…, "left")` and steers the split ratio to the remembered share, since Tern resizes in cells and hidden tabs measure differently. `follow` runs on `focus`, `tab_created`, `tab_closed`, `pane_created`, `pane_closed`, `window_start` and every `tick`, so one disabled hook can't strand the panel. Moves work across sessions. Edge cases:
 
@@ -200,9 +213,17 @@ In-memory only: the per-project `cache` (worktrees, PRs, loading/error flags), `
 - **Overseer closes a session:** `closeManagedSession` switches away and calls `follow` first, so the panel leaves before the session closes.
 - **Tern closes the panel's tab or session:** the panel dies with it. If you wanted it (`panel-open`) and its last tab is gone, `follow` opens a fresh one in the shown tab. If its tab is still there, you closed the panel yourself, and it stays closed until the shortcut.
 
-**Create.** Form or Carly → `wt.validate` → `launchCreation` opens a background tab running `worktree-operation.sh` and records a job → `checkJobs` (on `tick`) reads the receipt → on success: toast, apply the display name by branch (`applyCreatedName`), and for ticket worktrees `startTicketAgent` opens the session and calls `cx.agents:start({command = "omp", prompt = …})`. Creation succeeded means `wt` exited 0, not that every hook succeeded.
+**Create.** Form or Carly → `wt.validate` → `launchCreation` → `checkJobs` (on `tick`) reads the receipt → on success: toast, apply the display name to the new worktree (found by the path Orca reported, else by branch: `createdTree`, `applyCreatedName`), and for ticket worktrees `startTicketAgent` opens the session and calls `cx.agents:start({command = "omp", prompt = …})`. Creation succeeded means the backend's command exited 0, not that every hook succeeded. What runs depends on the backend:
 
-**Delete.** Confirmation → `wt.validate_removal` (repository identity, branch, cleanliness) → removal job in a background tab → receipt → close the worktree's session only if the directory is gone, then drop its name, binding and Ice Box entry.
+- **Worktrunk:** `wt switch --create`, run in a background tab by `worktree-operation.sh`; `checkJobs` reads its receipt.
+- **Plain Git:** `git worktree add -b <branch> -- <repo>.<branch> <base>` beside the primary checkout (refused if that path already exists), then the `orca.yaml` `scripts.setup` in the new worktree. A failed setup reports creation failed but keeps the worktree.
+- **Orca:** `orca-ide worktree create --repo path:<repo> --name <branch> --base-branch <base> --no-parent --json`. Orca chooses the directory and branch and runs its own setup; Overseer reads the created path from the JSON answer.
+
+**Delete.** Confirmation → `wt.validate_removal` (repository identity, branch, cleanliness) → removal job → receipt → close the worktree's session only if the directory is gone, then drop its name, binding and Ice Box entry. What runs depends on the backend:
+
+- **Worktrunk:** `wt remove`. The branch is kept.
+- **Plain Git:** the `orca.yaml` `scripts.archive` from the worktree first, with a 120 s timeout where `timeout` exists; a failed archive script stops the removal. Then `git worktree remove`. The branch is kept.
+- **Orca:** `orca-ide worktree rm --worktree path:<path> --run-hooks --json`. Orca's archive hook runs first, and a failure stops removal. Orca may delete the branch when it can prove it merged, under its own policy.
 
 **Agent status.** `agentActivity` reads `cx.agents:list()`: `state == "waiting_input"` → waiting, `"working"` → working. For agent CLIs in plain terminals (`omp`, `pi`, `claude`, `codex`, `opencode`, `gemini`, `aider`, `amp`, `cursor-agent`, `crush`, `goose`) it uses the pane's `busy` flag. Waiting wins over working per session and tab.
 
@@ -214,7 +235,7 @@ In-memory only: the per-project `cache` (worktrees, PRs, loading/error flags), `
 
 ### Developing
 
-Run the helper's tests (they use temporary repos, config and approvals):
+Run the helper's tests (they use temporary repos, config and approvals; the Worktrunk tests are skipped without `wt`):
 
 ```sh
 python3 -B tests/test_worktree_operation.py -v
@@ -248,7 +269,8 @@ Other conventions:
 
 ### Known limitations
 
-- macOS only (folder picker, paths, Tern desktop).
+- Linux is tested on Wayland with Tern 0.8.3 only.
+- The Orca backend needs Orca running. A project registered in Orca while Orca is closed falls back to Worktrunk or plain Git, and Orca then hides those worktrees as external.
 - Visualize PR fails on PRs whose diff exceeds GitHub's 20,000-line API limit (`gh pr diff` returns HTTP 406). The tab shows the error.
 - The panel moves into each tab you switch to, so every switch animates briefly and resizes the terminals in both tabs (full-screen programs redraw). In a tab split top-and-bottom it sits beside the top half.
 - If the timer hook is ever disabled, clicks and process results stop redrawing the panel until the plugin reloads; tab and focus changes still redraw it.

@@ -236,9 +236,11 @@ local function model(cx)
 		for _, worktree in (entry and entry.worktrees or {}) do
 			local item = table.clone(worktree)
 			item.deleting = removing(worktree.path, jobs)
-			item.displayName = names[project.id] and names[project.id][worktree.path]
+			-- A name given in Overseer wins; Orca's name (fixed there by hand) comes next.
+			item.displayName = names[project.id] and names[project.id][worktree.path] or worktree.orca and worktree.orca.name
 			item.pr = not worktree.is_main and worktree.branch and entry.prs and entry.prs[worktree.branch] or nil
 			item.ticket = ticketFor(project, worktree)
+				or (worktree.orca and worktree.orca.linear and worktree.orca.linear.url and worktree.orca.linear)
 			local session = boundSession(worktree.path, sessions, bindings)
 			item.session, item.tabs = session, session and tabs[tostring(session.id)] or {}
 			item.agent = session and activity.sessions[tostring(session.id)]
@@ -262,7 +264,7 @@ local function model(cx)
 end
 
 local NAVIGATOR = {
-	title = "Projects", about = "Local repositories, Worktrunk worktrees, and dedicated sessions.",
+	title = "Projects", about = "Local repositories, their worktrees, and dedicated sessions.",
 }
 
 -- Overseer also owns PR outline canvases; only navigators show Projects.
@@ -406,6 +408,8 @@ local function refreshByHand(cx)
 	-- An explicit refresh also re-checks pull requests immediately.
 	for _, entry in cache do entry.prAt = nil end
 	if linearDefault == false then linearDefault = nil end
+	-- Orca may have been started or a repository registered there since.
+	for _, project in projects() do wt.forget(project) end
 	refresh(cx, function(doneCx)
 		local function stop(stopCx)
 			spinning = false
@@ -780,7 +784,7 @@ local function confirmWorktreeAction(cx, id)
 		local jobs = records("jobs")
 		for _, job in jobs do
 			if job.project == project.id and (job.path == worktree.path or (worktree.branch and job.branch == worktree.branch)) then
-				failed(nextCx, "A Worktrunk operation is already running for this worktree."); return
+				failed(nextCx, "An operation is already running for this worktree."); return
 			end
 		end
 		local jobId = token()
@@ -839,6 +843,7 @@ local function openForm(cx, mode, project, worktree)
 			if worktree then names and names[worktree.path] or ""
 				elseif mode == "linear" then project.linear or ""
 				else project and project.base or "",
+			if mode == "create" and project then wt.creation_note(project) else "",
 		}, "beside")
 	end)
 	if not pane then report(cx, "Reload the Overseer plugin.", "Form unavailable"); return end
@@ -933,7 +938,40 @@ local function addPicked(cx, path)
 	end)
 end
 
--- Opens macOS's folder picker; choosing a Git repository adds it right away.
+-- Without a native dialog, a typed path (a leading ~ is the home directory).
+local function promptForFolder(cx)
+	cx:prompt({ value = pickerStart() .. "/", placeholder = "Path to a Git repository", icon = "folder", action = "add" })
+		:next(function(path, _err, nextCx)
+			picking = false
+			if not nextCx or type(path) ~= "string" then return end
+			path = path:match("^%s*(.-)%s*$")
+			if string.sub(path, 1, 1) == "~" then path = (tern.getenv("HOME") or "") .. string.sub(path, 2) end
+			if #path > 1 then path = path:gsub("/+$", "") end
+			if path ~= "" then addPicked(nextCx, path) end
+		end)
+end
+
+-- The system's folder picker: AppleScript on macOS, zenity or kdialog elsewhere.
+local function folderDialog()
+	if tern.runtime.os == "macos" then
+		local argv = { "/usr/bin/osascript" }
+		for _, line in CHOOSE_FOLDER do
+			table.insert(argv, "-e")
+			table.insert(argv, line)
+		end
+		table.insert(argv, pickerStart())
+		return argv
+	end
+	local zenity = wt.find_executable("zenity")
+	if zenity then
+		return { zenity, "--file-selection", "--directory", "--title=Add project", "--filename=" .. pickerStart() .. "/" }
+	end
+	local kdialog = wt.find_executable("kdialog")
+	if kdialog then return { kdialog, "--title", "Add project", "--getexistingdirectory", pickerStart() } end
+	return nil
+end
+
+-- Opens the folder picker; choosing a Git repository adds it right away.
 function pickProject(cx)
 	if not requireLocal(cx) then return end
 	if picking then
@@ -941,26 +979,51 @@ function pickProject(cx)
 		return
 	end
 	picking = true
-	local argv = { "/usr/bin/osascript" }
-	for _, line in CHOOSE_FOLDER do
-		table.insert(argv, "-e")
-		table.insert(argv, line)
-	end
-	table.insert(argv, pickerStart())
+	local argv = folderDialog()
+	if not argv then promptForFolder(cx); return end
 	-- The picker waits for the user; give up after 30 minutes untouched.
-	tern.process.run(argv, { timeout_ms = 30 * 60 * 1000 }, function(result, nextCx)
+	local ok, startError = pcall(tern.process.run, argv, { timeout_ms = 30 * 60 * 1000 }, function(result, nextCx)
 		picking = false
 		if not nextCx then return end
 		if result.status ~= 0 then
-			-- Cancel (AppleScript error -128), timeouts, and pickers ended by a
-			-- signal (status -1, e.g. a plugin reload) need no message.
-			if result.status == -1 or string.find(result.stderr or "", "-128", 1, true) then return end
+			-- Cancel (AppleScript error -128, zenity and kdialog exit 1), timeouts, and
+			-- pickers ended by a signal (status -1, e.g. a plugin reload) need no message.
+			if result.status == -1 or string.find(result.stderr or "", "-128", 1, true)
+				or (tern.runtime.os ~= "macos" and result.status == 1) then
+				return
+			end
 			report(nextCx, "Couldn't open the folder picker: " .. ((result.stderr or ""):match("^%s*(.-)%s*$")), "Folder picker failed")
 			return
 		end
 		local path = (result.stdout or ""):match("^%s*(.-)%s*$")
 		if #path > 1 then path = path:gsub("/+$", "") end
 		addPicked(nextCx, path)
+	end)
+	if not ok then
+		tern.log.warn("Folder picker unavailable: " .. tostring(startError))
+		promptForFolder(cx)
+	end
+end
+
+-- Repositories registered in Orca that Overseer doesn't list yet.
+local function pickOrcaProject(cx)
+	if not requireLocal(cx) then return end
+	wt.orca_repos(function(repos, err, nextCx)
+		if not nextCx then return end
+		if not repos then report(nextCx, err, "Orca projects unavailable"); return end
+		local known = {}
+		for _, project in projects() do known[project.path] = true end
+		local items = {}
+		for _, repo in repos do
+			if not known[repo.path] then
+				table.insert(items, { label = repo.name, detail = repo.path, icon = "folder", path = repo.path })
+			end
+		end
+		if #items == 0 then nextCx:toast("info", "Every Orca project is in Projects"); return end
+		nextCx:pick({ items = items, placeholder = "Add a project from Orca", icon = "folder", action = "add" })
+			:next(function(item, _pickErr, pickedCx)
+				if pickedCx and item then addPicked(pickedCx, item.path) end
+			end)
 	end)
 end
 
@@ -975,7 +1038,7 @@ local function normalizeName(raw)
 	return if name == "" then nil else name
 end
 
--- Starts Worktrunk's creation of `job.branch` in a background tab and records
+-- Starts the backend's creation of `job.branch` in a background tab and records
 -- `job` for checkJobs. Returns an error message instead when it cannot start.
 local function launchCreation(cx, project, job)
 	for _, other in records("jobs") do
@@ -1080,49 +1143,56 @@ local function changeLinear(cx, pane, request, response)
 	redraw(cx)
 end
 
--- The worktree's path is only known once Worktrunk has created it, so the
--- display name chosen at creation is attached afterwards, by branch.
+-- The new worktree: the path Orca reported, else the one on the job's branch
+-- (Git and Worktrunk create exactly that branch).
+local function createdTree(job, trees)
+	for _, tree in trees do
+		if not tree.is_main and (if job.path then tree.path == job.path else tree.branch == job.branch) then
+			return tree
+		end
+	end
+	return nil
+end
+
+-- The worktree's path is only known once the backend has created it, so the
+-- display name chosen at creation is attached afterwards.
 local function applyCreatedName(job)
 	local project = projectById(job.project)
 	if not job.displayName or not project then return end
 	wt.list(project, function(trees, _err, cx)
 		if not trees or not cx then return end
-		for _, tree in trees do
-			if tree.branch == job.branch and not tree.is_main then
-				local names = records("worktree-names")
-				names[project.id] = names[project.id] or {}
-				-- A rename made while setup ran wins over the name typed at creation.
-				if names[project.id][tree.path] == nil then
-					names[project.id][tree.path] = job.displayName
-					tern.kv.set("worktree-names", names)
-					redraw(cx)
-				end
-				return
-			end
+		local tree = createdTree(job, trees)
+		if not tree then return end
+		local names = records("worktree-names")
+		names[project.id] = names[project.id] or {}
+		-- A rename made while setup ran wins over the name typed at creation.
+		if names[project.id][tree.path] == nil then
+			names[project.id][tree.path] = job.displayName
+			tern.kv.set("worktree-names", names)
+			redraw(cx)
 		end
 	end)
 end
 
 -- A worktree created for a ticket gets an omp agent in its session, already
--- asked to read the ticket. Like the display name, its path is found by branch.
+-- asked to read the ticket. Like the display name, its path is found afterwards.
 local function startTicketAgent(job)
 	local project = projectById(job.project)
 	if not job.agentPrompt or not project then return end
 	wt.list(project, function(trees, err, cx)
 		if not cx then return end
 		if not trees then report(cx, err, "Agent not started"); return end
-		for _, tree in trees do
-			if tree.branch == job.branch and not tree.is_main then
-				ensureSession(cx, project, tree.path, tree.branch)
-				local ok, startError = pcall(function()
-					cx.agents:start({ prompt = job.agentPrompt, cwd = tree.path, command = "omp", how = "tab" })
-				end)
-				if not ok then report(cx, startError, "Agent not started") end
-				redraw(cx)
-				return
-			end
+		local tree = createdTree(job, trees)
+		if not tree then
+			report(cx, "No worktree for " .. (job.path or job.branch) .. " after creation.", "Agent not started")
+			return
 		end
-		report(cx, "No worktree for " .. job.branch .. " after creation.", "Agent not started")
+		ensureSession(cx, project, tree.path, tree.branch)
+		local ok, startError = pcall(function()
+			cx.agents:start({ prompt = job.agentPrompt, cwd = tree.path, command = "omp", how = "tab" })
+		end)
+		if not ok then report(cx, startError, "Agent not started") end
+		redraw(cx)
 	end)
 end
 
@@ -1210,6 +1280,21 @@ local function checkJobs(cx)
 			status = tonumber(tern.fs.read(job.receipt))
 			if status == nil then status = -1 end
 			tern.fs.remove(job.receipt)
+			-- Orca names the worktree it created in its JSON answer.
+			local resultFile = job.receipt .. ".result"
+			if job.kind == "create" and tern.fs.exists(resultFile) then
+				-- The JSON envelope, even if the CLI printed a warning line around it.
+				local ok, answer = pcall(function()
+					return tern.json.decode(string.match(tern.fs.read(resultFile), "%b{}") or "")
+				end)
+				local created = ok and type(answer) == "table" and type(answer.result) == "table" and answer.result.worktree
+				if type(created) == "table" then
+					job.path = if type(created.path) == "string" then created.path
+						elseif type(created.id) == "string" then string.match(created.id, "::(/.+)$")
+						else nil
+				end
+				tern.fs.remove(resultFile)
+			end
 		else
 			local pane = cx.session:pane(job.pane)
 			if (not pane or pane.exited ~= nil or pane.error) and helperFailed(id, job) then status = -1 end
@@ -1267,6 +1352,11 @@ end
 
 tern.command({ id = "projects", title = "Show or hide Projects", icon = "branch", keys = { "cmd+alt+shift+p" }, run = togglePanel })
 tern.command({ id = "add", title = "Add project", icon = "folder", run = function(cx) pickProject(cx) end })
+tern.command({
+	id = "add-orca", title = "Add project from Orca", icon = "folder",
+	available = function() return wt.orca_available() end,
+	run = function(cx) pickOrcaProject(cx) end,
+})
 tern.command({ id = "create", title = "Create worktree", icon = "branch", run = function(cx)
 	local project = activeWorktree(cx)
 	if project then openForm(cx, "create", project) else navigator(cx); cx:toast("info", "Choose a project", "Click + beside a project's name.") end
