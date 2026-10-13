@@ -151,3 +151,25 @@ tern_or("SUPER + B", "Forge Projects sidebar", "SUPER + ALT + SHIFT", "P", funct
     send("SUPER + CTRL + SHIFT", "B")
   end
 end)
+
+-- Was: "Universal copy" / "Universal paste". Omarchy sends Ctrl+Insert / Shift+Insert to windows
+-- tagged "terminal", else Ctrl+C / Ctrl+V. Tern isn't tagged, so it got Ctrl+C (an interrupt in a
+-- shell or agent) and Ctrl+V. On any Tern window, plugin running or not, send Tern's own Linux keys
+-- instead: Ctrl+Shift+C (edit.copy) and Ctrl+Shift+V (edit.paste).
+for _, c in ipairs({
+  { keys = "SUPER + C", key = "C", what = "Universal copy", mods = "CTRL", insert = { "CTRL", "Insert" } },
+  { keys = "SUPER + V", key = "V", what = "Universal paste", mods = "CTRL", insert = { "SHIFT", "Insert" } },
+}) do
+  bind(c.keys, c.what, function()
+    local window = hl.get_active_window()
+    if window and window.class == TERN_CLASS then
+      send("CTRL + SHIFT", c.key)
+      return
+    end
+    local tagged = false
+    for _, tag in ipairs(window and window.tags or {}) do
+      if tag:gsub("%*$", "") == "terminal" then tagged = true end
+    end
+    if tagged then send(c.insert[1], c.insert[2]) else send(c.mods, c.key) end
+  end)
+end

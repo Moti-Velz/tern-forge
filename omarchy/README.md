@@ -20,6 +20,7 @@ Makes Tern feel native on [Omarchy](https://omarchy.org/):
 | Super+Shift+A | New agent block | ChatGPT |
 | Super+Shift+P | New browser block | Google Photos |
 | Super+B | Toggle [Forge](../projects)'s Projects sidebar | Bring the last Tern window forward and show Projects there |
+| Super+C / Super+V | Copy / paste with Tern's own keys (Ctrl+Shift+C / Ctrl+Shift+V). Omarchy's universal copy didn't recognize Tern as a terminal and sent Ctrl+C, which interrupts the program in the pane | Universal copy / paste, unchanged |
 
 When focus moves onto Tern from another window, Tern focuses the pane on the edge you came in
 through. If you're coming back to the pane you left, it keeps that one.
