@@ -25,7 +25,7 @@ of these:
 
 API keys and the email login go into the system keychain (`plugin.meetings.granola-key`, `plugin.meetings.fireflies-key`, `plugin.meetings.email-account`). The folder path goes into the plugin's
 settings. Connecting a source again with an empty answer disconnects it. Items from every connected
-source are listed together, newest first, each tagged with its source.
+source are listed together, newest first, each tagged with its source. Email threads get their own **Email** tab.
 
 **Email:** each item is a thread from the last 45 days: Gmail's own threads (searched across All Mail,
 so your replies are included), or messages grouped by subject elsewhere. Its details are every message,
@@ -50,7 +50,8 @@ recorders can export one of these.
 | `Space` | Gather or release the meeting (✓) |
 | `Enter` | Add the gathered meetings, or the one under the cursor, to the agent |
 | `→` / `←` | Open the details of the meeting under the cursor (attendees, full summary, actions) / back to the list. In details, `↑` `↓` step through meetings |
-| `Tab` | Switch between **Synthesis** and **Full transcript** |
+| `Tab` / `1` `2` | Switch between the **Meetings** and **Email** tabs. Gathered items stay gathered across both, so one paste can hold a call and its email thread |
+| `t` | Switch between **Synthesis** and **Full transcript** |
 | `/` | Filter by title, owner or attendee as you type. `Enter` keeps the filter, `Esc` clears it |
 | `c` / `o` | Copy as Markdown / open where it lives (web page or file) |
 | `x` / `r` / `K` | Clear the gathered meetings / reload / connect a source |

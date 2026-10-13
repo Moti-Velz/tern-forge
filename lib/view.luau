@@ -17,6 +17,8 @@ export type State = {
 	details: { [string]: any },
 	detail_errors: { [string]: string },
 	sel: number,
+	-- Which list shows: meetings (Granola, Fireflies, local files) or email threads.
+	tab: "meetings" | "email",
 	picked: { string },
 	detail: boolean,
 	filter: string?,
@@ -66,7 +68,8 @@ end
 function View.visible(s: State): { any }
 	local out = {}
 	for _, n in s.notes do
-		if View.matches(n, s.filter, s.details[n.id]) then
+		local in_tab = (n.source == "email") == (s.tab == "email")
+		if in_tab and View.matches(n, s.filter, s.details[n.id] or n) then
 			table.insert(out, n)
 		end
 	end
@@ -145,14 +148,14 @@ end
 
 local LIST_KEYS = {
 	{ "↑↓", "move" }, { "→", "details" }, { "space", "gather" }, { "⏎", "add to agent" },
-	{ "tab", "mode" }, { "/", "filter" }, { "?", "more keys" },
+	{ "tab", "meetings / email" }, { "t", "mode" }, { "/", "filter" }, { "?", "more keys" },
 }
 local DETAIL_KEYS = {
 	{ "←", "back" }, { "↑↓", "prev / next" }, { "space", "gather" }, { "⏎", "add to agent" },
-	{ "tab", "mode" }, { "c", "copy" }, { "o", "open" },
+	{ "t", "mode" }, { "c", "copy" }, { "o", "open" },
 }
 local MORE_KEYS = {
-	{ "j k", "move" }, { "h l", "back / details" }, { "g G", "top / bottom" },
+	{ "j k", "move" }, { "h l", "back / details" }, { "g G", "top / bottom" }, { "1 2", "meetings / email" },
 	{ "c", "copy as Markdown" }, { "o", "open in its app / file" }, { "x", "clear gathered" },
 	{ "r", "reload" }, { "K", "connect a source" }, { "esc", "back / to the agent" },
 }
@@ -174,13 +177,26 @@ local function key_hints(list: { { string } }, key: string): Node
 end
 
 function View.render(s: State, rows: number): BlockView
+	local counts = { meetings = 0, email = 0 }
+	for _, n in s.notes do
+		local t = if n.source == "email" then "email" else "meetings"
+		counts[t] += 1
+	end
+	local function tab_button(id: "meetings" | "email", label: string, keyn: string): Node
+		return button("tab_" .. id, label .. (if counts[id] > 0 then " " .. tostring(counts[id]) else ""),
+			"tab=" .. id, label .. " (" .. keyn .. ", or tab to switch)",
+			if s.tab == id then "meetings.tabOn" else "meetings.tabOff")
+	end
 	local header: { Node } = {
-		text("title", "Meetings", "meetings.heading", { grow = 1 }),
+		ui.node("row", { key = "tabs", role = "meetings.tabs", grow = 1 }, {
+			tab_button("meetings", "Meetings", "1"),
+			tab_button("email", "Email", "2"),
+		}),
 	}
 	if s.loading then
 		table.insert(header, text("loading", "loading…", "meetings.muted"))
 	end
-	table.insert(header, button("reload", "↻", "reload", "Reload meetings (r)", "meetings.icon"))
+	table.insert(header, button("reload", "↻", "reload", "Reload (r)", "meetings.icon"))
 	local main: { Node } = { ui.node("row", { key = "header", role = "meetings.header" }, header) }
 
 	if s.key == "missing" then
@@ -211,13 +227,24 @@ function View.render(s: State, rows: number): BlockView
 	if s.detail and #shown > 0 then
 		main = detail_screen(s, shown[cur], cur, #shown, picked[shown[cur].id] == true)
 	elseif #shown == 0 then
+		local email_on = table.find(s.sources, "Email") ~= nil
 		table.insert(main, text("none",
-			if s.loading then "Loading meetings…"
-				elseif #s.notes == 0 then "No meetings yet."
-				else "No meeting matches the filter.",
+			if s.loading then "Loading…"
+				elseif s.tab == "email" and not email_on then "Connect email with K: your address and an app password. Nothing is marked as read."
+				elseif s.filter and s.filter ~= "" then "Nothing matches the filter."
+				elseif s.tab == "email" then "No email threads in the last 45 days."
+				else "No meetings yet.",
 			"meetings.muted"))
 	else
 		local items: { any } = {}
+		local seen: { [string]: boolean } = {}
+		local tab_sources = 0
+		for _, n in shown do
+			if n.source and not seen[n.source] then
+				seen[n.source] = true
+				tab_sources += 1
+			end
+		end
 		for i, n in shown do
 			local parts: { string } = {}
 			local when = context.when(n.created_at, s.now, s.offset)
@@ -225,10 +252,10 @@ function View.render(s: State, rows: number): BlockView
 				table.insert(parts, when)
 			end
 			local from = context.SOURCES[n.source or ""]
-			if #s.sources > 1 and from then
+			if s.tab == "meetings" and tab_sources > 1 and from then
 				table.insert(parts, from)
 			end
-			local who = attendees(s.details[n.id], 3)
+			local who = attendees(s.details[n.id] or (if n.attendees then n else nil), 3)
 			if who then
 				table.insert(parts, who)
 			end
@@ -277,7 +304,7 @@ function View.render(s: State, rows: number): BlockView
 	}))
 	local dock: { Node } = {
 		ui.node("row", { key = "status", role = "meetings.status" }, status),
-		key_hints(if s.detail then DETAIL_KEYS else LIST_KEYS, "keys"),
+		key_hints(if s.detail and #shown > 0 then DETAIL_KEYS else LIST_KEYS, "keys"),
 	}
 	if s.help then
 		table.insert(dock, key_hints(MORE_KEYS, "more"))

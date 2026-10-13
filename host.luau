@@ -115,6 +115,17 @@ local function set_mode(s: State, transcript: boolean)
 	tern.kv.set("transcript", transcript)
 end
 
+-- Each tab keeps its own cursor; the filter and the details screen don't carry over.
+local function switch_tab(s: State, tab: "meetings" | "email")
+	if tab == s.tab then
+		return
+	end
+	s.sels[s.tab] = s.sel
+	s.tab = tab
+	s.sel = s.sels[tab] or 1
+	s.detail, s.filter, s.filtering = false, nil, false
+end
+
 local function reload(s: State)
 	s.loading = true
 	s.error = nil
@@ -185,7 +196,10 @@ local function on_key(s: State, k: Key, _cx: BlockCx): boolean?
 		want_detail(s)
 	elseif (name == "left" or name == "h") and s.detail then
 		s.detail = false
-	elseif name == "tab" then
+	elseif name == "tab" or name == "1" or name == "2" then
+		switch_tab(s, if name == "1" then "meetings" elseif name == "2" then "email"
+			elseif s.tab == "meetings" then "email" else "meetings")
+	elseif name == "t" then
 		set_mode(s, not s.transcript)
 	elseif name == "/" then
 		s.detail = false
@@ -293,6 +307,8 @@ local function on_event(s: State, ev: UiEvent, cx: BlockCx)
 		request(cx, "picked", { ids = "" })
 	elseif ev.act == "mode" then
 		set_mode(s, ev.value == "transcript")
+	elseif ev.act == "tab" and (ev.value == "meetings" or ev.value == "email") then
+		switch_tab(s, ev.value)
 	elseif ev.act == "reload" then
 		reload(s)
 	elseif ev.act == "key" then
@@ -314,6 +330,8 @@ tern.block.define("panel", {
 			details = {},
 			detail_errors = {},
 			sel = 1,
+			tab = if type(saved) == "table" and saved.tab == "email" then "email" else "meetings",
+			sels = {},
 			picked = restore_ids(saved),
 			detail = false,
 			filter = nil,
@@ -349,6 +367,6 @@ tern.block.define("panel", {
 	key = on_key,
 	event = on_event,
 	save = function(s: State): any
-		return { picked = s.picked }
+		return { picked = s.picked, tab = s.tab }
 	end,
 })

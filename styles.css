@@ -102,3 +102,29 @@
   color: var(--t1);
   background: color-mix(in srgb, var(--accent) 9%, transparent);
 }
+[data-role='meetings.tabs'] {
+  gap: 4px;
+  align-items: center;
+}
+[data-role='meetings.tabOn'],
+[data-role='meetings.tabOff'] {
+  font: inherit;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+}
+[data-role='meetings.tabOn'] {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+[data-role='meetings.tabOff'] {
+  color: var(--t3);
+}
+[data-role='meetings.tabOff']:hover {
+  color: var(--t1);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
