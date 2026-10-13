@@ -43,7 +43,7 @@ Subscription usage is integrated from [tern-claude-usage](https://github.com/zer
 
 ## The panel
 
-The panel stays with you: it sits on the left of whichever tab you're looking at, across every session, and keeps the width you give it. Each project is a local Git repository. Under it, every worktree is a row, and under each row are its open tabs. Click a tab to jump straight to it. Hover a row for its branch, path, line counts, ahead/behind and PR. For projects registered in Orca, the hover also shows Orca's board status and comment; Orca's display name is used when you haven't named the row, and the ticket badge can come from Orca's linked Linear issue when the branch name has no ticket id.
+The panel stays with you: it sits on the left of whichever tab you're looking at, across every session, and keeps the width you give it. Each project is a local Git repository. Under it, every worktree is a row, and under each row are its open tabs. Rows are ordered by what they need from you: **needs you** first, then working, in progress, in review, idle, and done at the bottom; within each, the most recently used or committed first. Stacked worktrees sit indented under their parent. Click a tab to jump straight to it. Hover a row for its branch, path, line counts, ahead/behind and PR. For projects registered in Orca, the hover also shows Orca's board status and comment; Orca's display name is used when you haven't named the row, and the ticket badge can come from Orca's linked Linear issue when the branch name has no ticket id.
 
 <table>
 <tr>
@@ -60,7 +60,10 @@ The panel stays with you: it sits on the left of whichever tab you're looking at
 | **conflicts** | A merge or rebase is stuck |
 | Linear logo | The branch is linked to a ticket (**Link ticket**, an agent, or copied from Orca), or its name contains one (`feat/ENG-123-…`) |
 | PR icon | Draft, open, merged or closed PR |
-| 🧊 | Parked in the Ice Box |
+| **needs you** | An agent waits for you, a merge is stuck, CI is failing or changes were requested on the PR |
+| **working** · **in progress** · **in review** · **done** | An agent is working · uncommitted work, commits ahead of the base or a draft PR · the PR is open · the PR merged or closed |
+| **Delete** | The PR merged: one click (and a confirmation) removes the worktree |
+| Indented under another row | Stacked work: the branch was created on top of that worktree's branch, or its PR targets it |
 
 </td>
 </tr>
@@ -78,7 +81,8 @@ You need macOS or Linux and:
 | Orca (`orca-ide` CLI) | reading Orca's repositories and worktree details | optional |
 | `zenity` or `kdialog` (Linux) | the folder picker | optional |
 | [GitHub CLI](https://cli.github.com) (`gh`), signed in | PR badges, Visualize PR | optional |
-| [Linear CLI](https://github.com/schpet/linear-cli) (`linear`), signed in | ticket links | optional |
+| A Linear personal API key (**Connect Linear** in the palette) | your issues in the Open box, new tickets, moving tickets along, ticket links | optional |
+| [Linear CLI](https://github.com/schpet/linear-cli) (`linear`), signed in | the workspace for ticket links when Linear isn't connected | optional |
 | [omp](https://omp.sh) | ticket agents, Visualize PR | optional |
 
 ```sh
@@ -96,18 +100,28 @@ On Linux, use the `tern` binary from your Tern install in place of the macOS pat
 1. **Show Projects:** <kbd>⌘</kbd><kbd>⌥</kbd><kbd>⇧</kbd><kbd>P</kbd>, or **Show or hide Projects** in the command palette. Press it again while the panel has focus to hide it.
 2. **Add a repo:** **+** in the header opens the folder picker. With Orca installed, every repository registered in Orca is added on its own when Tern starts and on ↻. **Add project from Orca** in the command palette lists the ones not in Projects yet.
 3. **Open a worktree:** click its row. Its session opens, and the panel comes with it.
-4. **Open or create a worktree:** **+** next to a project, or **Super+Alt+Shift+O** from any of its worktrees, opens one box (Orca's model). Type a branch, a ticket (`ENG-123` or a Linear link) or a pull request (`#42` or a GitHub link). Worktrees it names, in any project, are listed as you type, straight from Forge's cache with no network calls; ↑↓ and Enter open one. Enter on the first row resolves what you typed: an existing worktree opens; a PR is checked out from its head branch (forks too, via `refs/pull/<n>/head`); a ticket gets branch `feature/<ID>`, linked to the ticket; a branch that exists locally or on origin is checked out; anything else becomes a new branch from the base. The form says what setup will run: Worktrunk hooks, the `orca.yaml` setup script, Orca's setup script for that repository, or nothing. New worktrees are made in a background tab and open when ready.
+4. **Open or create a worktree:** **+** next to a project, or **Super+Alt+Shift+O** from any of its worktrees, opens one box (Orca's model). Type a branch, a ticket (`ENG-123` or a Linear link) or a pull request (`#42` or a GitHub link). As you type, the box lists what it names, straight from Forge's cache with no network calls: worktrees in any project, this repository's open PRs that are yours or wait for your review, and your open Linear issues (refreshed in the background every two minutes). ↑↓ and Enter pick one. Enter on what you typed resolves it: an existing worktree opens; a PR is checked out from its head branch (forks too, via `refs/pull/<n>/head`); a ticket gets branch `feature/<ID>`, linked to the ticket; a branch that exists locally or on origin is checked out; anything else becomes a new branch from the base. Text with spaces is a title: with Linear connected, Enter creates a Linear issue with that title, assigned to you (in the team most of the project's tickets use), and a worktree for it. Repositories with submodules get them initialized in the new worktree. The form says what setup will run: Worktrunk hooks, the `orca.yaml` setup script, Orca's setup script for that repository, or nothing. New worktrees are made in a background tab and open when ready.
+
+   **Agent prompt.** The box's last field starts an omp agent in the worktree. It fills itself in from the row you pick: a ticket gets *"Read the Linear ticket <link> … come back with questions before writing any code"*, a PR gets *"Review pull request <link> …"*. Edit it, or empty it to start no agent. Worktrees and plain branches start with it empty.
 5. **Everything else is a right-click away:**
 
 <img src="docs/images/context-menu.png" alt="Right-click menu on a worktree" width="420">
 
 - **Visualize PR** for a reviewer's outline of the branch's pull request
 - **Rename** changes the row's label (the branch stays as it is)
-- **Add to Ice Box** parks a worktree at the bottom; 🧊 in the header hides or shows parked ones
+- **New stacked worktree** opens the box stacked on this worktree: new branches start from its branch, are recorded as its children (`git config branch.<child>.forge-parent <parent>`) and show indented under it
 - **Close session** stops its programs and closes its tabs (the files stay)
 - **Link ticket** links the worktree's branch to a Linear issue (`ENG-123` or its URL). Leave it empty to unlink. Agents and Carly do the same: see [Agents and Carly](#agents-and-carly).
-- **Delete worktree** removes it with the project's backend. It refuses if there are uncommitted changes. The branch is always kept.
+- **Delete worktree** removes it with the project's backend. It refuses if there are uncommitted changes, including in a submodule, or commits in a submodule that aren't on its remote. The branch is always kept. A worktree whose PR merged also offers **Delete** right on its row, and a toast says so when the PR merges.
 - On a project: **Change base branch** and **Set Linear workspace**
+
+### Linear: tickets that move with the work
+
+Run **Connect Linear (personal API key)** from the palette and paste a key from Linear's *Settings → Security & access → Personal API keys*. It's checked against Linear and kept in the system keychain (**Disconnect Linear** removes it). Then:
+
+- The Open box lists your open issues and can create new ones.
+- Tickets move forward on their own: a worktree created for a ticket sets it to **In Progress**, its PR opening sets **In Review** (when the team has a started state named like "review"), and the PR merging sets **Done**. Forge only ever moves a ticket forward, once per stage, so Linear's own GitHub automation and manual changes win.
+- Ticket links use your Linear workspace without the Linear CLI.
 
 ### Start work from a ticket
 
@@ -183,7 +197,9 @@ flowchart LR
 - **Ticket links live in Git.** Each branch's ticket is `git config branch.<branch>.forge-ticket` (an id like `ENG-123`, or the issue URL). It's repository-local and never pushed. You set it from the panel (**Link ticket**), agents set it with `forge-links` (see `skills/forge-links`), `ticket_worktree` sets it, and an Orca Linear link is copied in when the branch has none.
 - **Tern owns the sessions.** Forge remembers which session belongs to which worktree and switches between them.
 - **The panel follows you.** Tern plugins can't pin a sidebar to the window, so Forge keeps one Projects panel per window and moves it into whichever tab you're on.
-- **Everything else is a read.** PR badges, ticket links, agent status and change counts come from `gh`, `linear`, `git` and Tern's own agent state.
+- **Everything else is a read, except Linear status.** PR badges, CI and review state, ticket links, agent status and change counts come from `gh`, `git`, Linear's API (or the `linear` CLI) and Tern's own agent state. The one write outside Git is moving a linked ticket forward in Linear, when Linear is connected.
+- **Stacks live in Git too.** A stacked branch's parent is `git config branch.<branch>.forge-parent <parent>`, next to its ticket. A PR whose base is another worktree's branch shows as its child without it.
+- **Submodules.** New worktrees (plain Git or Worktrunk) run `git submodule update --init --recursive` when the repository has `.gitmodules`. Git refuses to remove a worktree with submodules without `--force`, and their repositories live inside the worktree's Git directory, so deletion first checks every submodule for uncommitted changes and for commits not on a remote, then removes with `git worktree remove --force` (the archive script still runs for plain Git).
 
 ## Safety
 
@@ -247,16 +263,18 @@ Tern's plugin KV (`~/Library/Application Support/Tern/plugin-data/forge/kv.json`
 
 | Key | Shape | Notes |
 |---|---|---|
-| `projects` | `[{id, name, path, base, linear?}]` | `id` is the repository's shared Git directory, so linked checkouts dedupe. `linear` overrides the CLI workspace. |
+| `projects` | `[{id, name, path, base, linear?}]` | `id` is the repository's shared Git directory, so linked checkouts dedupe. `linear` overrides the Linear workspace. |
 | `worktree-names` | `{[projectId]: {[path]: name}}` | Display names. Removed when Forge deletes the worktree. |
 | `sessions` | `{[path]: {id, host, project}}` | Worktree → Tern session binding. |
-| `icebox` | `{[projectId]: {[path]: true}}` | Parked worktrees. `show-icebox` is the header toggle. |
-| `jobs` | `{[id]: {kind = "create" \| "remove", project, receipt, pane, …}}` | Running creations and deletions; creations also carry `branch`, `displayName?` and `agentPrompt?`. Persisted so a plugin reload doesn't lose them. |
+| `linear-stages` | `{[ticketId]: 1 \| 2 \| 3}` | How far Forge has moved each ticket (In Progress, In Review, Done), so each move happens once. |
+| `jobs` | `{[id]: {kind = "create" \| "remove", project, receipt, pane, …}}` | Running creations and deletions; creations also carry `branch`, `displayName?`, `agentPrompt?`, `ticket?`, `base?` (a stacked parent), `checkout?`, `pr?` and `open?`. Persisted so a plugin reload doesn't lose them. |
 | `panel-open`, `panel-share` | `boolean`, `number` | Whether you want the Projects panel shown (the shortcut sets it), and its width as a share of the tab. |
 
 Files under `tern.plugin.data`: `creation-<id>.status` and `removal-<id>.status` receipts written by the helper, and the `visual-pr/<project>-<pr>-<headsha>.md` outline cache.
 
-In-memory only: the per-project `cache` (worktrees, PRs, loading/error flags), `rendered` signatures per panel pane, the panel's pane and last tab, the Linear default workspace, open outline canvases.
+The Linear API key is the keychain secret `plugin.forge.linear-api-key`.
+
+In-memory only: the per-project `cache` (worktrees, PRs with CI and review state, your open PRs for the Open box, loading/error flags), your open Linear issues, when each worktree was last used, `rendered` signatures per panel pane, the panel's pane and last tab, the Linear default workspace, open outline canvases.
 
 ### Flows
 
@@ -273,7 +291,7 @@ In-memory only: the per-project `cache` (worktrees, PRs, loading/error flags), `
 - **Worktrunk:** `wt switch --create`, run in a background tab by `worktree-operation.sh`; `checkJobs` reads its receipt.
 - **Plain Git:** `git worktree add -b <branch> -- <repo>.<branch> <base>` beside the primary checkout (refused if that path already exists), then the setup script in the new worktree (`orca.yaml`'s `scripts.setup`, else Orca's for that repository). A failed setup reports creation failed but keeps the worktree.
 
-**Delete.** Confirmation → `wt.validate_removal` (repository identity, branch, cleanliness) → removal job → receipt → close the worktree's session only if the directory is gone, then drop its name, binding and Ice Box entry. What runs depends on the backend:
+**Delete.** Confirmation → `wt.validate_removal` (repository identity, branch, cleanliness) → removal job → receipt → close the worktree's session only if the directory is gone, then drop its name and binding. What runs depends on the backend:
 
 - **Worktrunk:** `wt remove`. The branch is kept.
 - **Plain Git:** the archive script first (`orca.yaml`'s `scripts.archive` from the worktree, else Orca's for that repository), with a 120 s timeout where `timeout` exists; a failed archive script stops the removal. Then `git worktree remove`. The branch is kept.

@@ -44,6 +44,26 @@ local PR_STATES = {
 	closed = { role = "forge.prClosed", label = "Closed" },
 }
 
+-- Each worktree's status chip (see statusOf in window.luau). Idle shows none.
+local STATUS = {
+	needs = { label = "needs you", role = "forge.statusNeeds" },
+	working = { label = "working", role = "forge.statusWorking" },
+	progress = { label = "in progress", role = "forge.statusProgress" },
+	review = { label = "in review", role = "forge.statusReview" },
+	done = { label = "done", role = "forge.statusDone" },
+}
+
+-- Why a worktree needs you, for its hover text.
+local function needsWhy(worktree)
+	local why = {}
+	if worktree.agent == "waiting" then table.insert(why, "an agent is waiting for you") end
+	if worktree.conflicts then table.insert(why, "merge conflicts") end
+	local pr = worktree.pr
+	if pr and pr.checks == "failing" then table.insert(why, "CI is failing") end
+	if pr and pr.review == "changes" then table.insert(why, "changes were requested") end
+	return table.concat(why, ", ")
+end
+
 local function dot(key, role)
 	return ui.el("div", { key = key, role = role })
 end
@@ -90,7 +110,16 @@ local function details(worktree, branch)
 		table.insert(lines, (worktree.remote.name or "Upstream") .. ": " .. divergence(worktree.remote))
 	end
 	local pr = worktree.pr and PR_STATES[worktree.pr.state]
-	if pr then table.insert(lines, "PR #" .. tostring(worktree.pr.number) .. " · " .. pr.label) end
+	if pr then
+		local extra = ""
+		if worktree.pr.checks then extra ..= " · CI " .. worktree.pr.checks end
+		if worktree.pr.review == "approved" then extra ..= " · approved"
+		elseif worktree.pr.review == "changes" then extra ..= " · changes requested"
+		elseif worktree.pr.review == "required" then extra ..= " · review required" end
+		table.insert(lines, "PR #" .. tostring(worktree.pr.number) .. " · " .. pr.label .. extra)
+	end
+	if worktree.parentName then table.insert(lines, "Stacked on " .. worktree.parentName) end
+	if worktree.status == "needs" then table.insert(lines, "Needs you: " .. needsWhy(worktree)) end
 	local orca = worktree.orca
 	if orca and orca.status then table.insert(lines, "Orca: " .. string.gsub(orca.status, "-", " ")) end
 	if orca and orca.comment then table.insert(lines, "“" .. orca.comment .. "”") end
@@ -103,7 +132,6 @@ local function details(worktree, branch)
 	else
 		table.insert(lines, "No session · click to open")
 	end
-	if worktree.iced then table.insert(lines, "In the Ice Box") end
 	return table.concat(lines, "\n")
 end
 
@@ -116,31 +144,23 @@ local function worktreeNode(worktree, activePath)
 		-- Menu entries show their action string verbatim, so actions are titled.
 		if worktree.pr then table.insert(menu, "Visualize PR") end
 		if worktree.branch then table.insert(menu, "Link ticket") end
+		if worktree.branch and not worktree.is_main then table.insert(menu, "New stacked worktree") end
 		table.insert(menu, "Rename")
-		if not worktree.is_main then
-			table.insert(menu, if worktree.iced then "Remove from Ice Box" else "Add to Ice Box")
-		end
 		if worktree.session then table.insert(menu, "Close session") end
 		if not worktree.is_main then table.insert(menu, "Delete worktree") end
 	end
-	local status
-	if worktree.iced then
-		status = text("status", "🧊", "forge.iceMark", { title = "In the Ice Box" })
-	else
-		local role, title = "forge.dotIdle", "No session"
-		if worktree.deleting then
-			role, title = "forge.dotBusy", "Deleting"
-		elseif worktree.agent == "waiting" then
-			role, title = "forge.dotWaiting", "Agent waiting for you"
-		elseif worktree.agent == "working" then
-			role, title = "forge.dotAgent", "Agent working"
-		elseif worktree.session then
-			role, title = "forge.dotOpen", "Session open"
-		end
-		status = ui.el("div", { key = "status", role = role, title = title })
+	local role, title = "forge.dotIdle", "No session"
+	if worktree.deleting then
+		role, title = "forge.dotBusy", "Deleting"
+	elseif worktree.agent == "waiting" then
+		role, title = "forge.dotWaiting", "Agent waiting for you"
+	elseif worktree.agent == "working" then
+		role, title = "forge.dotAgent", "Agent working"
+	elseif worktree.session then
+		role, title = "forge.dotOpen", "Session open"
 	end
 	local head = {
-		status,
+		ui.el("div", { key = "status", role = role, title = title }),
 		text("branch", label, "forge.branch"),
 	}
 	-- The conflicts badge already says the worktree has unfinished changes.
@@ -157,6 +177,13 @@ local function worktreeNode(worktree, activePath)
 	end
 	if worktree.deleting then
 		table.insert(head, text("deleting", "deleting", "forge.badgeWarn"))
+	elseif worktree.offerDelete then
+		-- Its PR merged: the worktree has done its job.
+		table.insert(head, ui.el("button", {
+			key = "delete", role = "forge.deleteOffer", text = "Delete",
+			title = "The PR merged. Delete this worktree (asks first; the branch is kept)",
+			actions = { click = "delete=" .. worktree.path },
+		}))
 	elseif not worktree.session then
 		table.insert(head, text("open", "Open", "forge.openHint"))
 	end
@@ -184,6 +211,7 @@ local function worktreeNode(worktree, activePath)
 	local subtitle = if worktree.displayName then branch
 		elseif worktree.is_main then "primary checkout · " .. basename(worktree.path)
 		else basename(worktree.path)
+	local chip = STATUS[worktree.status]
 	local summary = ui.node("col", {
 		key = "row", role = "forge.worktreeRow", title = details(worktree, branch),
 		aria = label .. (if worktree.agent == "waiting" then ", agent waiting for you"
@@ -191,11 +219,14 @@ local function worktreeNode(worktree, activePath)
 				elseif worktree.session then ", session open"
 				else ", open session")
 			.. (if worktree.conflicts then ", merge conflicts" elseif worktree.dirty then ", uncommitted changes" else "")
-			.. (if worktree.iced then ", in the Ice Box" else ""),
+			.. (if chip then ", " .. chip.label else ""),
 		actions = { click = if worktree.deleting then nil else "open=" .. worktree.path, menu = menu },
 	}, {
 		ui.node("row", { key = "head", role = "forge.worktreeHead" }, head),
-		text("subtitle", subtitle, "forge.worktreeSubtitle"),
+		ui.node("row", { key = "sub", role = "forge.worktreeSubRow" }, {
+			text("subtitle", subtitle, "forge.worktreeSubtitle", { grow = 1 }),
+			if chip then text("chip", chip.label, chip.role) else nil,
+		}),
 	})
 	local children = { summary }
 	for _, tab in ipairs(worktree.tabs or {}) do
@@ -221,10 +252,17 @@ local function worktreeNode(worktree, activePath)
 			actions = if tab.pane then { click = "tab=" .. tostring(tab.pane) } else nil,
 		}, tabChildren))
 	end
-	return ui.node("col", {
-		key = "w" .. safeKey(worktree.path), role = "forge.worktree",
+	local node = ui.node("col", {
+		key = "w" .. safeKey(worktree.path), role = "forge.worktree", grow = 1,
 		mark = if active then "pick" else nil,
 	}, children)
+	-- Stacked worktrees sit indented under their parent, behind a guide line.
+	local depth = worktree.depth or 0
+	if depth == 0 then return node end
+	return ui.node("row", { key = "stack" .. safeKey(worktree.path), role = "forge.stackRow" }, {
+		ui.el("div", { key = "indent", role = "forge.stackIndent" .. tostring(depth) }),
+		node,
+	})
 end
 
 function View.render(model)
@@ -247,9 +285,6 @@ function View.render(model)
 			}, {
 				text("glyph", "↻", if model.refreshing then "forge.refreshGlyphSpin" else "forge.refreshGlyph"),
 			}),
-			button("icebox", "🧊", "toggle-icebox",
-				if model.showIcebox then "Hide Ice Box worktrees" else "Show Ice Box worktrees",
-				if model.showIcebox then "forge.iconButtonOn" else "forge.iconButton"),
 		}),
 	}
 	if model.confirmation then
@@ -307,7 +342,7 @@ function View.render(model)
 			for _, worktree in ipairs(project.worktrees or {}) do
 				table.insert(projectChildren, worktreeNode(worktree, model.activePath))
 			end
-			if not project.loading and not project.error and #(project.worktrees or {}) == 0 and project.hiddenIced == 0 then
+			if not project.loading and not project.error and #(project.worktrees or {}) == 0 then
 				table.insert(projectChildren, text("empty", "No worktrees found. Refresh to check this repository.", "forge.hint"))
 			end
 		end

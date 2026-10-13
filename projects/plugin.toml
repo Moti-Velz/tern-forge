@@ -1,8 +1,8 @@
 schema = 1
 id = "forge"
 name = "Forge"
-version = "3.2.0"
-description = "Agent workbench for parallel work: projects, their git worktrees (plain Git, Worktrunk or Orca), a Tern session per worktree, and Claude / ChatGPT subscription usage."
+version = "3.3.0"
+description = "Agent workbench for parallel work: projects, their git worktrees (plain Git or Worktrunk; Orca read in), a Tern session per worktree with status worked out from agents, Git, PRs and CI, Linear tickets that move with the work, and Claude / ChatGPT subscription usage."
 icon = "branch"
 host = "host.luau"
 window = "window.luau"

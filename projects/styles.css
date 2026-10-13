@@ -168,6 +168,47 @@
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 35%, transparent);
   }
 }
+[data-role='forge.dotTab'],
+[data-role='forge.dotTabAgent'],
+[data-role='forge.dotTabWaiting'] {
+  width: 8px;
+  height: 8px;
+  min-width: 8px;
+  border-radius: 50%;
+}
+[data-role='forge.dotOpen'] {
+  background: var(--ok);
+}
+[data-role='forge.dotIdle'] {
+  border: 1.5px solid var(--t4);
+}
+[data-role='forge.dotBusy'] {
+  background: var(--warn);
+}
+/* An agent is working in this worktree's session: the green dot pulses. */
+[data-role='forge.dotAgent'],
+[data-role='forge.dotTabAgent'] {
+  background: var(--ok);
+  animation: forge-agent-pulse 1.6s ease-out infinite;
+}
+@keyframes forge-agent-pulse {
+  from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 70%, transparent); }
+  to { box-shadow: 0 0 0 6px color-mix(in srgb, var(--ok) 0%, transparent); }
+}
+/* An agent asked you something: a steady accent dot with a halo, so it reads
+   apart from working (green, pulsing) and deleting (amber). */
+[data-role='forge.dotWaiting'],
+[data-role='forge.dotTabWaiting'] {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-role='forge.dotAgent'],
+  [data-role='forge.dotTabAgent'] {
+    animation: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 35%, transparent);
+  }
+}
 /* Ice Box worktrees show 🧊 in the dot's place. It is wider than the 8px dot;
    the negative margins keep names aligned with the rows above. */
 [data-role='forge.iceMark'] {
@@ -306,8 +347,7 @@
 }
 [data-role='forge.button'],
 [data-role='forge.primaryButton'],
-[data-role='forge.iconButton'],
-[data-role='forge.iconButtonOn'] {
+[data-role='forge.iconButton'] {
   color: var(--t2);
   background: transparent;
   border: 1px solid color-mix(in srgb, var(--t4) 30%, transparent);
@@ -317,8 +357,7 @@
   font: inherit;
   font-size: 0.9em;
 }
-[data-role='forge.iconButton'],
-[data-role='forge.iconButtonOn'] {
+[data-role='forge.iconButton'] {
   padding: 4px 8px;
 }
 /* The per-project New Worktree +: sized to match the worktree count beside it. */
@@ -328,11 +367,6 @@
   line-height: 16px;
   border-radius: 5px;
 }
-/* A toggle that is on, e.g. Ice Box worktrees shown. */
-[data-role='forge.iconButtonOn'] {
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-}
 [data-role='forge.primaryButton'] {
   color: var(--accent);
   border-color: var(--accent);
@@ -340,7 +374,6 @@
 [data-role='forge.button']:hover,
 [data-role='forge.primaryButton']:hover,
 [data-role='forge.iconButton']:hover,
-[data-role='forge.iconButtonOn']:hover,
 [data-role='forge.projectToggle']:hover,
 [data-role='forge.tabRow'].sf-act:hover {
   color: var(--t1);
@@ -452,3 +485,66 @@
   opacity: 0.6;
   font-size: 0.9em;
 }
+/* Status chip under the name, right-aligned: what the worktree needs, worked out
+   from its agent, Git and PR. Idle worktrees show none. */
+[data-role='forge.worktreeSubRow'] {
+  align-items: center;
+  gap: 6px;
+}
+[data-role='forge.statusNeeds'],
+[data-role='forge.statusWorking'],
+[data-role='forge.statusProgress'],
+[data-role='forge.statusReview'],
+[data-role='forge.statusDone'] {
+  flex-shrink: 0;
+  font-size: 0.72em;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--t3);
+  background: color-mix(in srgb, var(--t4) 16%, transparent);
+}
+[data-role='forge.statusNeeds'] {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  font-weight: 650;
+}
+[data-role='forge.statusWorking'] {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 13%, transparent);
+}
+[data-role='forge.statusReview'] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+[data-role='forge.statusDone'] {
+  opacity: 0.75;
+}
+/* A merged PR's worktree offers to go. */
+[data-role='forge.deleteOffer'] {
+  flex-shrink: 0;
+  font: inherit;
+  font-size: 0.75em;
+  padding: 0 7px;
+  border-radius: 999px;
+  cursor: pointer;
+  color: var(--bad);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--bad) 40%, transparent);
+}
+[data-role='forge.deleteOffer']:hover {
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+}
+/* Stacked worktrees: indented under their parent, behind a guide line. */
+[data-role='forge.stackRow'] {
+  gap: 0;
+}
+[data-role='forge.stackIndent1'],
+[data-role='forge.stackIndent2'],
+[data-role='forge.stackIndent3'] {
+  flex-shrink: 0;
+  margin: 4px 0 4px 10px;
+  border-left: 1px solid color-mix(in srgb, var(--t4) 45%, transparent);
+}
+[data-role='forge.stackIndent1'] { width: 8px; min-width: 8px; }
+[data-role='forge.stackIndent2'] { width: 22px; min-width: 22px; }
+[data-role='forge.stackIndent3'] { width: 36px; min-width: 36px; }

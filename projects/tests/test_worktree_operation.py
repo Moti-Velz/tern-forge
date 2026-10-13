@@ -292,6 +292,58 @@ class GitOperationTests(OperationFixture, RemovalSafety, unittest.TestCase):
         self.assertFalse((self.root / "repo space é's.feature-nowhere").exists())
         self.assertNotIn("refs/heads/feature/nowhere", self.git("for-each-ref", "refs/heads/"))
 
+    def with_submodule(self):
+        """Adds a submodule (a local repository with one commit) to the project."""
+        # Local paths as submodule URLs need file transport allowed.
+        self.env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "protocol.file.allow", "GIT_CONFIG_VALUE_0": "always"})
+        lib = self.root / "lib"
+        lib.mkdir()
+        self.git("init", "-q", "-b", "master", cwd=lib)
+        (lib / "lib.txt").write_text("library\n")
+        self.git("add", ".", cwd=lib)
+        self.git("commit", "-q", "-m", "lib", cwd=lib)
+        self.git("submodule", "add", "-q", str(lib), "vendor/lib")
+        self.git("commit", "-q", "-m", "add submodule")
+
+    def test_creation_initializes_submodules(self):
+        self.with_submodule()
+        result = self.operation("create", "with-sub", "master")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        path = self.root / "repo space é's.with-sub"
+        self.assertEqual((path / "vendor/lib/lib.txt").read_text(), "library\n")
+
+    def test_clean_worktree_with_submodules_is_removed(self):
+        self.with_submodule()
+        self.assertEqual(self.operation("create", "with-sub", "master").returncode, 0)
+        path = self.root / "repo space é's.with-sub"
+        result = self.operation("remove", path, "with-sub")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(path.exists())
+        self.assertIn("refs/heads/with-sub", self.git("for-each-ref", "refs/heads/"))
+
+    def test_submodule_changes_are_not_deleted(self):
+        self.with_submodule()
+        self.assertEqual(self.operation("create", "with-sub", "master").returncode, 0)
+        path = self.root / "repo space é's.with-sub"
+        (path / "vendor/lib/scratch.txt").write_text("unsaved\n")
+        result = self.operation("remove", path, "with-sub")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((path / "vendor/lib/scratch.txt").read_text(), "unsaved\n")
+
+    def test_unpushed_submodule_commits_are_not_deleted(self):
+        self.with_submodule()
+        self.assertEqual(self.operation("create", "with-sub", "master").returncode, 0)
+        path = self.root / "repo space é's.with-sub"
+        sub = path / "vendor/lib"
+        self.git("checkout", "-q", "-b", "local-work", cwd=sub)
+        (sub / "lib.txt").write_text("changed\n")
+        self.git("commit", "-q", "-am", "local only", cwd=sub)
+        # The superproject records the new commit, so only the submodule check can catch it.
+        self.git("commit", "-q", "-am", "bump", cwd=path)
+        result = self.operation("remove", path, "with-sub")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.git("log", "-1", "--format=%s", cwd=sub), "local only")
+
     def test_setup_script_runs_in_the_new_worktree_with_orca_environment(self):
         marker = self.root / "setup-env"
         result = self.operation("create", "with-setup", "master", self.RECORD_ENV + '"' + str(marker) + '"')

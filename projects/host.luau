@@ -8,9 +8,12 @@ end
 -- Everything that differs between the form's modes. The first field takes focus.
 local MODES = {
 	open = {
-		heading = "Open worktree", submit = "Open", fields = { "query", "name" },
+		heading = "Open worktree", submit = "Open", fields = { "query", "name", "prompt" },
 		help = function(state)
 			local note = if state.note ~= "" then " " .. state.note else ""
+			if state.parent then
+				return state.project .. " · Stacked on " .. state.parent .. ": new branches start from it." .. note
+			end
 			return state.project .. " · New branches start from " .. state.base .. "." .. note
 		end,
 	},
@@ -29,7 +32,7 @@ local MODES = {
 	linear = {
 		heading = "Linear workspace", submit = "Save workspace", fields = { "linear" },
 		help = function(state)
-			return state.project .. " · Branches that name a ticket, such as feature/ENG-123, link to it in this workspace. Leave blank to use the Linear CLI's workspace."
+			return state.project .. " · Branches that name a ticket, such as feature/ENG-123, link to it in this workspace. Leave blank to use the workspace of your Linear connection."
 		end,
 	},
 }
@@ -38,20 +41,36 @@ local function fieldOrder(state)
 	return MODES[state.mode].fields
 end
 
--- At most this many worktrees are suggested under the box.
-local SUGGESTIONS = 8
+-- At most this many suggestions are listed under the box.
+local SUGGESTIONS = 10
 
--- The worktrees the box's text names: substring matches on branch, display name,
--- ticket, PR number and project, this project's first. Empty text lists this
--- project's worktrees.
+local function trimmed(state)
+	return state.fields.query.text:match("^%s*(.-)%s*$")
+end
+
+-- What the typed text names, as the window will read it: "pr" (#42, 42 or a
+-- GitHub PR link), "ticket" (ENG-123 or a Linear link), else "branch".
+local function typedKind(query)
+	if string.match(query, "github%.com/[^/]+/[^/]+/pull/%d+") or string.match(query, "^#?%d+$") then return "pr" end
+	local upper = string.upper(query)
+	if (string.find(query, "linear.app", 1, true) and string.match(upper, "%u[%u%d]*%-%d+"))
+		or string.match(upper, "^%u[%u%d]*%-%d+$") then
+		return "ticket"
+	end
+	return "branch"
+end
+
+-- The candidates the box's text names: substring matches on branch, title or
+-- display name, ticket, PR number and project, this project's first. Empty text
+-- lists this project's worktrees, your PRs there and your Linear issues.
 local function suggestions(state)
-	local query = string.lower(state.fields.query.text:match("^%s*(.-)%s*$"))
+	local query = string.lower(trimmed(state))
 	local out = {}
 	for _, c in state.candidates do
 		local hay = string.lower(table.concat({
 			c.branch or "", c.name or "", c.ticket or "", if c.pr then "#" .. tostring(c.pr) else "", c.project or "",
 		}, " "))
-		local hit = if query == "" then c.here else string.find(hay, query, 1, true) ~= nil
+		local hit = if query == "" then c.here and not c.primary else string.find(hay, query, 1, true) ~= nil
 		if hit then
 			table.insert(out, c)
 			if #out >= SUGGESTIONS then break end
@@ -60,12 +79,68 @@ local function suggestions(state)
 	return out
 end
 
--- The row Enter acts on: 0 is "open or create what I typed", 1.. a suggestion.
--- Typing selects the first suggestion when it's in this project (they come
--- first); another project's worktree is only opened when picked.
+-- Every row Enter can act on, in order: what you typed, then the suggestions.
+-- What you typed is "typed" (open or create it), or, when it has spaces (a
+-- title, never a branch) and Linear is connected, "new ticket" (create a Linear
+-- issue titled with it).
+local function choices(state)
+	local query = trimmed(state)
+	local out = {}
+	if query ~= "" then
+		local title = string.find(query, "%s") ~= nil and typedKind(query) == "branch"
+		table.insert(out, { kind = if title and state.linear then "new ticket" else "typed" })
+	end
+	for _, c in suggestions(state) do table.insert(out, c) end
+	return out
+end
+
+-- The agent prompt a choice starts with: a ticket gets read and questioned, a
+-- PR reviewed; worktrees and plain branches start no agent. "{ticket}" is
+-- replaced by the ticket's link once the window knows it.
+local function defaultPrompt(state, choice)
+	if not choice then return "" end
+	local kind, url = choice.kind, choice.url
+	if kind == "typed" then
+		kind = typedKind(trimmed(state))
+		local query = trimmed(state)
+		if kind == "pr" then
+			local number = string.match(query, "(%d+)$")
+			url = if string.match(query, "^https?://") then query
+				elseif state.github and number then "https://github.com/" .. state.github .. "/pull/" .. number
+				else "#" .. tostring(number)
+		end
+	elseif kind == "new ticket" then
+		kind = "ticket"
+	end
+	if kind == "ticket" then
+		return "Read the Linear ticket " .. (url or "{ticket}")
+			.. " and the code it touches, then come back with questions before writing any code."
+	elseif kind == "pr" then
+		return "Review pull request " .. (url or ("#" .. tostring(choice.pr)))
+			.. ": summarize what it changes and anything that looks risky, then wait for my go-ahead."
+	end
+	return ""
+end
+
+-- Keeps the prompt field in step with the selected row until you edit it.
+local function syncPrompt(state)
+	if state.mode ~= "open" or state.promptEdited then return end
+	state.fields.prompt = Input.new(defaultPrompt(state, choices(state)[state.sel]))
+end
+
+-- The row Enter acts on (1-based into choices). Typing selects the first
+-- suggestion when it's in this project (they come first), else what you typed;
+-- another project's worktree is only opened when picked.
 local function resetSelection(state)
-	local first = suggestions(state)[1]
-	state.sel = if string.find(state.fields.query.text, "%S") and first and first.here then 1 else 0
+	local list = choices(state)
+	state.sel = 1
+	for index, choice in list do
+		if choice.kind ~= "typed" and choice.kind ~= "new ticket" then
+			if choice.here and choice.kind == "worktree" and trimmed(state) ~= "" then state.sel = index end
+			break
+		end
+	end
+	syncPrompt(state)
 end
 
 local function focus(state, cx)
@@ -93,15 +168,26 @@ local function finish(state, cancelled)
 	elseif state.mode == "linear" then
 		response = { mode = "linear", linear = state.fields.linear.text }
 	else
-		local pick = state.sel > 0 and suggestions(state)[state.sel] or nil
-		if pick then
-			response = { mode = "open", path = pick.path }
-		elseif not string.find(state.fields.query.text, "%S") then
+		local pick = choices(state)[state.sel]
+		local prompt, name = state.fields.prompt.text, state.fields.name.text
+		if not pick then
 			state.error = "Enter a branch, ticket or pull request, or pick a worktree."
 			state.focus = "query"
 			return
+		elseif pick.kind == "worktree" then
+			response = { mode = "open", path = pick.path, prompt = prompt }
+		elseif pick.kind == "pr" then
+			response = { mode = "open", query = "#" .. tostring(pick.pr), name = name, prompt = prompt }
+		elseif pick.kind == "ticket" then
+			response = {
+				mode = "open", query = pick.url or pick.ticket,
+				name = if string.find(name, "%S") then name else pick.name, prompt = prompt,
+			}
 		else
-			response = { mode = "open", query = state.fields.query.text, name = state.fields.name.text }
+			response = {
+				mode = "open", query = state.fields.query.text, name = name, prompt = prompt,
+				newTicket = pick.kind == "new ticket",
+			}
 		end
 	end
 	local ok, err = pcall(tern.kv.set, "form:" .. state.token, response)
@@ -124,6 +210,7 @@ tern.block.define("form", {
 		state.fields = {
 			name = Input.new(if mode == "rename" then args[4] or "" else ""),
 			query = Input.new(""),
+			prompt = Input.new(""),
 			base = Input.new(if mode == "base" then args[4] or "" else ""),
 			linear = Input.new(if mode == "linear" then args[4] or "" else ""),
 		}
@@ -139,14 +226,20 @@ tern.block.define("form", {
 			state.submitted = saved.submitted == true
 			state.cancelled = saved.cancelled == true
 		end
-		-- The Open box's worktrees, put in kv by Forge's window half before opening the form.
+		-- The Open box's suggestions and context, put in kv by Forge's window half
+		-- before opening the form: { items, github, workspace, linear, parent }.
 		state.candidates = {}
 		if mode == "open" and state.token ~= "" then
-			local ok, list = pcall(tern.kv.get, "form-data:" .. state.token)
-			if ok and type(list) == "table" then state.candidates = list end
+			local ok, data = pcall(tern.kv.get, "form-data:" .. state.token)
+			if ok and type(data) == "table" then
+				state.candidates = if type(data.items) == "table" then data.items else {}
+				state.github, state.linear = data.github, data.linear == true
+				state.parent = if type(data.parent) == "string" then data.parent else nil
+			end
 		end
-		state.sel = 0
-		resetSelection(state)
+		state.promptEdited = type(saved) == "table" and saved.promptEdited == true
+		state.sel = 1
+		if not state.promptEdited then resetSelection(state) end
 		-- A restarted form must never publish its response a second time.
 		if state.token == "" then
 			state.error = "Missing form token. Close this pane and reopen the form from Projects."
@@ -184,10 +277,12 @@ tern.block.define("form", {
 				name = if state.mode == "open" then "Display name for a new worktree (optional)" else "Display name (optional)",
 				query = "Branch, ticket or pull request", base = "Base branch",
 				linear = "Workspace URL or name",
+				prompt = "Agent prompt (optional; empty starts no agent)",
 			}
 			local placeholders = {
 				name = if state.mode == "rename" then state.project else "e.g. Fix onboarding",
 				query = "branch · ENG-123 · #42 · link", base = "main", linear = "https://linear.app/your-team",
+				prompt = "Ask an omp agent to start on it",
 			}
 			for _, name in ipairs(fieldOrder(state)) do
 				table.insert(children, text(name .. "Label", labels[name], "forge.fieldLabel"))
@@ -196,28 +291,46 @@ tern.block.define("form", {
 				props.placeholder = placeholders[name]
 				table.insert(children, ui.node("input", props))
 				if name == "query" then
-					local typed = state.fields.query.text:match("^%s*(.-)%s*$")
+					local typed = trimmed(state)
 					local rows = {}
-					if typed ~= "" then
-						table.insert(rows, ui.el("button", {
-							key = "typed", role = if state.sel == 0 then "forge.suggestionOn" else "forge.suggestion",
-							text = "↵ Open or create “" .. typed .. "”", actions = { click = "pick=0" },
-						}))
-					end
-					for index, c in ipairs(suggestions(state)) do
-						local meta = {}
-						if c.name and c.name ~= c.branch then table.insert(meta, c.branch or "detached") end
-						if c.ticket then table.insert(meta, c.ticket) end
-						if c.pr then table.insert(meta, "#" .. tostring(c.pr) .. " " .. (c.prState or "")) end
-						if not c.here then table.insert(meta, c.project) end
-						if c.primary then table.insert(meta, "primary") end
-						table.insert(rows, ui.el("button", {
-							key = "s" .. index, role = if state.sel == index then "forge.suggestionOn" else "forge.suggestion",
-							title = c.path, actions = { click = "pick=" .. index },
-						}, {
-							text("label", c.name or c.branch or "Detached HEAD", "forge.suggestionLabel"),
-							text("meta", table.concat(meta, " · "), "forge.suggestionMeta"),
-						}))
+					for index, c in ipairs(choices(state)) do
+						local role = if state.sel == index then "forge.suggestionOn" else "forge.suggestion"
+						if c.kind == "typed" then
+							local kind = typedKind(typed)
+							table.insert(rows, ui.el("button", {
+								key = "typed", role = role, actions = { click = "pick=" .. index },
+								text = "↵ " .. (if kind == "pr" then "Open pull request" elseif kind == "ticket" then "Open ticket"
+									else "Open or create branch") .. " “" .. typed .. "”",
+							}))
+						elseif c.kind == "new ticket" then
+							table.insert(rows, ui.el("button", {
+								key = "newTicket", role = role, actions = { click = "pick=" .. index },
+								text = "＋ New Linear ticket “" .. typed .. "”",
+								title = "Creates a Linear issue with this title, assigned to you, and a worktree for it",
+							}))
+						else
+							local meta = {}
+							if c.kind == "pr" then
+								table.insert(meta, "PR #" .. tostring(c.pr) .. " · " .. (c.why or ""))
+								if c.prState == "draft" then table.insert(meta, "draft") end
+							elseif c.kind == "ticket" then
+								table.insert(meta, c.ticket .. (if c.why then " · " .. c.why else ""))
+							else
+								if c.name and c.name ~= c.branch then table.insert(meta, c.branch or "detached") end
+								if c.ticket then table.insert(meta, c.ticket) end
+								if c.pr then table.insert(meta, "#" .. tostring(c.pr) .. " " .. (c.prState or "")) end
+								if not c.here then table.insert(meta, c.project) end
+								if c.primary then table.insert(meta, "primary") end
+							end
+							table.insert(rows, ui.el("button", {
+								key = "s" .. index, role = role, title = c.path or c.url,
+								actions = { click = "pick=" .. index },
+							}, {
+								text("label", (if c.kind == "worktree" then "" elseif c.kind == "pr" then "⇡ " else "◆ ")
+									.. (c.name or c.branch or "Detached HEAD"), "forge.suggestionLabel"),
+								text("meta", table.concat(meta, " · "), "forge.suggestionMeta"),
+							}))
+						end
 					end
 					if #rows > 0 then
 						table.insert(children, ui.node("col", { key = "suggestions", role = "forge.suggestions" }, rows))
@@ -232,7 +345,7 @@ tern.block.define("form", {
 				}),
 			}))
 			table.insert(children, text("keys", if state.mode == "open"
-				then "↑↓ to choose · Enter to open · Esc to go back · Tab to the display name"
+				then "↑↓ to choose · Enter to open · Tab to the name and agent prompt · Esc to go back"
 				else "Enter to submit · Esc to go back · Tab to change fields", "forge.hint"))
 			if not state.focusScheduled then
 				state.focusScheduled = true
@@ -259,10 +372,10 @@ tern.block.define("form", {
 			finish(state, false)
 			if not state.submitted then focus(state, cx) end
 		elseif state.mode == "open" and state.focus == "query" and (key.name == "up" or key.name == "down") then
-			local count = #suggestions(state)
-			local first = if string.find(state.fields.query.text, "%S") then 0 else 1
+			local count = #choices(state)
 			if count == 0 then return false end
-			state.sel = math.clamp(state.sel + (if key.name == "up" then -1 else 1), first, count)
+			state.sel = math.clamp(state.sel + (if key.name == "up" then -1 else 1), 1, count)
+			syncPrompt(state)
 		elseif key.name == "tab" then
 			local order = fieldOrder(state)
 			local index = table.find(order, state.focus) or 1
@@ -277,7 +390,11 @@ tern.block.define("form", {
 			local handled, err = Input.key(state.fields[state.focus], key)
 			if not handled then return false end
 			state.error = err
-			if state.focus == "query" and state.fields.query.text ~= before then resetSelection(state) end
+			if state.fields[state.focus].text ~= before then
+				if state.focus == "query" then resetSelection(state) end
+				-- Your own words stay: the prompt no longer follows the selected row.
+				if state.focus == "prompt" then state.promptEdited = true end
+			end
 			focus(state, cx)
 		end
 		return true
@@ -300,7 +417,8 @@ tern.block.define("form", {
 			end
 		elseif event.ev == "action" then
 			if event.act == "pick" then
-				state.sel = tonumber(event.value) or 0
+				state.sel = tonumber(event.value) or 1
+				syncPrompt(state)
 				finish(state, false)
 			elseif event.act == "submit" then
 				finish(state, false)
@@ -315,7 +433,7 @@ tern.block.define("form", {
 		for name, field in pairs(state.fields) do fields[name] = field.text end
 		return {
 			token = state.token, mode = state.mode, focus = state.focus, fields = fields,
-			submitted = state.submitted, cancelled = state.cancelled,
+			submitted = state.submitted, cancelled = state.cancelled, promptEdited = state.promptEdited,
 		}
 	end,
 })

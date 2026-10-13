@@ -660,18 +660,51 @@ local function overlay_orca(orca, project, trees, done)
 	end)
 end
 
+-- Each branch's parent for stacked work: `git config branch.<branch>.forge-parent <branch>`.
+local PARENT_KEY = "forge-parent"
+
+-- Forge's per-branch settings, by branch: tickets[branch], parents[branch].
 local function read_tickets(project, done)
-	git(project.path, { "config", "--get-regexp", "^branch\\..*\\." .. TICKET_KEY .. "$" }, function(result, _err, cx)
-		local tickets = {}
+	git(project.path, { "config", "--get-regexp", "^branch\\..*\\.forge-(ticket|parent)$" }, function(result, _err, cx)
+		local tickets, parents = {}, {}
 		-- Exit 1 means none are set.
 		if result and result.status == 0 then
 			for line in string.gmatch(result.stdout, "[^\n]+") do
-				-- `-` is a pattern quantifier, so the key is matched escaped.
+				-- `-` is a pattern quantifier, so the keys are matched escaped.
 				local branch, value = string.match(line, "^branch%.(.+)%.forge%-ticket (.+)$")
 				if branch and value then tickets[branch] = value end
+				branch, value = string.match(line, "^branch%.(.+)%.forge%-parent (.+)$")
+				if branch and value then parents[branch] = value end
 			end
 		end
-		done(tickets, cx)
+		done(tickets, parents, cx)
+	end)
+end
+
+-- Stacks `branch` on `parent` (nil clears it). done(ok, err, cx)
+function M.set_parent(project, branch, parent, done)
+	local key = "branch." .. branch .. "." .. PARENT_KEY
+	local args = if parent and parent ~= "" then { "config", key, parent } else { "config", "--unset", key }
+	git(project.path, args, function(result, err, cx)
+		if result and (result.status == 0 or (result.status == 5 and not parent)) then
+			done(true, nil, cx)
+		else
+			done(false, err or command_error("Cannot save the parent branch", result), cx)
+		end
+	end)
+end
+
+-- When each local branch last got a commit (Unix seconds), by branch name.
+local function commit_times(project, done)
+	git(project.path, { "for-each-ref", "--format=%(committerdate:unix) %(refname:short)", "refs/heads" }, function(result, _err, cx)
+		local times = {}
+		if result and result.status == 0 then
+			for line in string.gmatch(result.stdout, "[^\n]+") do
+				local at, branch = string.match(line, "^(%d+) (.+)$")
+				if at then times[branch] = tonumber(at) end
+			end
+		end
+		done(times, cx)
 	end)
 end
 
@@ -697,9 +730,12 @@ function M.list(project, done)
 	detect(project, function(backend, _cx)
 		local function finish(trees, err, cx)
 			if not trees then done(trees, err, cx); return end
-			read_tickets(project, function(tickets, ticketCx)
+			read_tickets(project, function(tickets, parents, _ticketCx)
+			commit_times(project, function(times, ticketCx)
 				for _, tree in trees do
 					tree.ticket_link = tree.branch and tickets[tree.branch] or nil
+					tree.parent_branch = tree.branch and parents[tree.branch] or nil
+					tree.committed = tree.branch and times[tree.branch] or nil
 				end
 				local orca = orca_cli()
 				if orca then
@@ -707,6 +743,7 @@ function M.list(project, done)
 				else
 					done(trees, nil, ticketCx)
 				end
+			end)
 			end)
 		end
 		if backend.kind == "worktrunk" then
@@ -727,7 +764,9 @@ local function branch_error(branch)
 	return nil
 end
 
-function M.validate(project, branch, done)
+-- `base`: the branch the new one starts from (default: the project's base).
+function M.validate(project, branch, done, base)
+	base = base or project.base
 	local invalid = branch_error(branch)
 	if invalid then
 		deferred_error(done, invalid)
@@ -742,13 +781,13 @@ function M.validate(project, branch, done)
 			done(nil, command_error("Invalid branch name", result), cx)
 			return
 		end
-		git(project.path, { "show-ref", "--verify", "--quiet", "refs/heads/" .. project.base }, function(base, base_err, base_cx)
-			if not base then
+		git(project.path, { "show-ref", "--verify", "--quiet", "refs/heads/" .. base }, function(found, base_err, base_cx)
+			if not found then
 				done(nil, base_err, base_cx)
 				return
 			end
-			if base.status ~= 0 then
-				done(nil, "Local base branch '" .. project.base .. "' is unavailable. Restore it or re-add the project.", base_cx)
+			if found.status ~= 0 then
+				done(nil, "Local base branch '" .. base .. "' is unavailable. Restore it or re-add the project.", base_cx)
 				return
 			end
 			git(project.path, { "show-ref", "--verify", "--quiet", "refs/heads/" .. branch }, function(existing, existing_err, existing_cx)
@@ -834,12 +873,14 @@ end
 -- Git creates the worktree beside the primary checkout, as Worktrunk's default
 -- template does, and runs the setup script there (orca.yaml's, else Orca's
 -- settings'); Worktrunk uses its own layout and hooks.
-function M.creation_command(project, branch, receipt)
+-- A new branch from `base` (default: the project's base branch; a parent
+-- worktree's branch for stacked work).
+function M.creation_command(project, branch, receipt, base)
 	local invalid = branch_error(branch)
 	if invalid then error(invalid, 0) end
 	local backend = backends[project.id] or plain_backend()
 	local hook = if backend.kind == "git" then M.hook_script(project.path, project.path, "setup") else ""
-	return operation_command("create", project, branch, project.base, receipt, hook)
+	return operation_command("create", project, branch, base or project.base, receipt, hook)
 end
 
 -- A worktree for a branch that already exists: local, on origin, or a PR's head
@@ -904,7 +945,19 @@ local function github_repo(url)
 	return owner, name
 end
 
-local PR_FIELDS = "nodes { ... on PullRequest { number state isDraft url updatedAt headRefName } }"
+local PR_FIELDS = "nodes { ... on PullRequest { number title state isDraft url updatedAt headRefName baseRefName "
+	.. "reviewDecision commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }"
+
+-- CI's overall state on a PR's last commit: "passing", "failing", "pending" or nil.
+local function checks_of(pr)
+	local nodes = type(pr.commits) == "table" and pr.commits.nodes
+	local rollup = type(nodes) == "table" and nodes[1] and nodes[1].commit and nodes[1].commit.statusCheckRollup
+	local state = type(rollup) == "table" and rollup.state
+	return if state == "SUCCESS" then "passing"
+		elseif state == "FAILURE" or state == "ERROR" then "failing"
+		elseif state == "PENDING" or state == "EXPECTED" then "pending"
+		else nil
+end
 
 -- Several PRs can share a head branch (reopened, recreated). Prefer an open
 -- one; otherwise the most recently updated. GitHub's `head:` search can also
@@ -925,7 +978,15 @@ local function pick_pr(nodes, branch)
 		elseif best.state == "CLOSED" then "closed"
 		elseif best.isDraft then "draft"
 		else "open"
-	return { number = best.number, state = state, url = best.url }
+	return {
+		number = best.number, state = state, url = best.url, title = best.title, base = best.baseRefName,
+		checks = checks_of(best),
+		-- "approved", "changes" (changes requested) or "required" (review required).
+		review = if best.reviewDecision == "APPROVED" then "approved"
+			elseif best.reviewDecision == "CHANGES_REQUESTED" then "changes"
+			elseif best.reviewDecision == "REVIEW_REQUIRED" then "required"
+			else nil,
+	}
 end
 
 -- Looks up the pull request for each branch with one GitHub GraphQL request,
@@ -969,6 +1030,60 @@ function M.pull_requests(project, branches, done)
 			end
 			done(found, nil, next_cx)
 		end)
+	end)
+end
+
+-- Open pull requests of the project's GitHub repository that are yours or wait
+-- for your review, for the Open box. done({ repo = "owner/name", prs = {{ number,
+-- title, branch, url, draft, mine, review }} }, err, cx); not a GitHub
+-- repository gives an empty list.
+function M.my_pull_requests(project, done)
+	local gh = find_executable("gh")
+	if not gh then
+		deferred_error(done, "GitHub CLI (gh) was not found")
+		return
+	end
+	git(project.path, { "remote", "get-url", "origin" }, function(remote, err, cx)
+		if not remote then done(nil, err, cx); return end
+		local owner, name = github_repo(output_line(remote.stdout))
+		if remote.status ~= 0 or not owner then done({ prs = {} }, nil, cx); return end
+		local repo = owner .. "/" .. name
+		local fields = "nodes { ... on PullRequest { number title url isDraft headRefName updatedAt } }"
+		run({
+			gh, "api", "graphql",
+			"-f", "mine=repo:" .. repo .. " is:pr is:open author:@me",
+			"-f", "review=repo:" .. repo .. " is:pr is:open review-requested:@me",
+			"-f", "query=query($mine: String!, $review: String!) { mine: search(query: $mine, type: ISSUE, first: 30) { "
+				.. fields .. " } review: search(query: $review, type: ISSUE, first: 30) { " .. fields .. " } }",
+		}, function(result, run_err, next_cx)
+			if not result then done(nil, run_err, next_cx); return end
+			if result.status ~= 0 then done(nil, command_error("GitHub lookup failed", result), next_cx); return end
+			local ok, value = pcall(decode_output, result.stdout)
+			if not ok or type(value) ~= "table" or type(value.data) ~= "table" then
+				done(nil, "GitHub returned an unexpected response", next_cx)
+				return
+			end
+			local byNumber, prs = {}, {}
+			for _, list in { "mine", "review" } do
+				local hits = value.data[list]
+				for _, pr in (type(hits) == "table" and hits.nodes or {}) do
+					if type(pr) == "table" and type(pr.number) == "number" then
+						local row = byNumber[pr.number]
+						if not row then
+							row = {
+								number = pr.number, title = pr.title, branch = pr.headRefName, url = pr.url,
+								draft = pr.isDraft == true, updated = pr.updatedAt,
+							}
+							byNumber[pr.number] = row
+							table.insert(prs, row)
+						end
+						if list == "mine" then row.mine = true else row.review = true end
+					end
+				end
+			end
+			table.sort(prs, function(a, b) return (a.updated or "") > (b.updated or "") end)
+			done({ repo = repo, prs = prs }, nil, next_cx)
+		end, project.path)
 	end)
 end
 

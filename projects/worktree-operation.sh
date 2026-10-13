@@ -98,6 +98,23 @@ run_orca_hook() {
     return "$status"
 }
 
+# The checkout path of `branch` in this repository, from Git's own list.
+worktree_of_branch() {
+    git -C "$repo" worktree list --porcelain | awk -v ref="refs/heads/$1" '
+        /^worktree / { path = substr($0, 10) }
+        $0 == "branch " ref { print path; exit }'
+}
+
+# A new checkout has empty submodule directories; fill them, recursively, as a
+# clone with --recurse-submodules would. A failure is reported but keeps the worktree.
+init_submodules() {
+    local path
+    path=$(worktree_of_branch "$target")
+    [ -n "$path" ] && [ -f "$path/.gitmodules" ] || return 0
+    printf 'Initializing submodules in %s\n' "$path"
+    git -C "$path" submodule update --init --recursive
+}
+
 create_worktree() {
     case "$backend" in
         worktrunk)
@@ -111,9 +128,12 @@ create_worktree() {
                 return 1
             fi
             git -C "$repo" worktree add -b "$target" -- "$path" "$option" || return
+            init_submodules || return
             run_orca_hook setup "$path"
+            return
             ;;
-    esac
+    esac || return
+    init_submodules
 }
 
 # A worktree for a branch that already exists, locally, on origin, or as a pull
@@ -145,9 +165,12 @@ checkout_worktree() {
                 return 1
             fi
             git -C "$repo" worktree add -- "$path" "$target" || return
+            init_submodules || return
             run_orca_hook setup "$path"
+            return
             ;;
-    esac
+    esac || return
+    init_submodules
 }
 
 remove_worktree() {
@@ -167,12 +190,33 @@ remove_worktree() {
         printf 'Refusing removal: the worktree branch changed after confirmation.\n' >&2
         return 1
     fi
+    local status
     changes=$(git -C "$target" status --porcelain=v1 --untracked-files=normal) || return 1
     if [ -n "$changes" ]; then
         printf 'Refusing removal: worktree has uncommitted or untracked files.\n' >&2
         return 1
     fi
-    local status
+    # Git won't remove a worktree with submodules without --force, and their
+    # repositories live inside this worktree's Git directory, so commits made in
+    # them would go too. Refuse while any submodule has changes or commits that
+    # aren't on a remote; then --force only gets past the submodule rule.
+    if [ -n "$(git -C "$target" submodule status --recursive 2>/dev/null)" ]; then
+        local unsaved
+        unsaved=$(git -C "$target" submodule foreach --quiet --recursive \
+            'git status --porcelain --untracked-files=normal; git log --oneline HEAD --branches --not --remotes') || return 1
+        if [ -n "$unsaved" ]; then
+            printf 'Refusing removal: a submodule has uncommitted changes or unpushed commits:\n%s\n' "$unsaved" >&2
+            return 1
+        fi
+        [ "$backend" = git ] && { run_orca_hook archive "$target" || return; }
+        git -C "$repo" worktree remove --force -- "$target"
+        status=$?
+        if [ "$status" -eq 0 ] && [ -e "$target" ]; then
+            printf 'Removal returned success but the worktree path still exists.\n' >&2
+            return 1
+        fi
+        return "$status"
+    fi
     case "$backend" in
         worktrunk)
             "$tool" -C "$repo" remove --foreground --no-delete-branch -- "$target"

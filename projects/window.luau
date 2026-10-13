@@ -2,6 +2,7 @@
 local wt = require("./worktrunk")
 local view = require("./view")
 local visualize = require("./visualize")
+local linear = require("./linear")
 local usage = require("./usage/window")
 
 local cache = {}
@@ -21,6 +22,8 @@ local sequence = 0
 local linearDefault
 -- Defined after forms(); openForm starts it.
 local watchForms
+-- Open Linear issues assigned to you, for the Open box: { issues, at, loading, error }.
+local myIssues = {}
 
 local function records(key)
 	local value = tern.kv.get(key)
@@ -223,27 +226,47 @@ local function ticketFor(project, worktree)
 	return { id = id, url = "https://linear.app/" .. workspace .. "/issue/" .. id }
 end
 
+-- Where a worktree stands, worked out from what Forge already knows (agent state,
+-- Git, the PR and its checks and review), most urgent first. The primary
+-- checkout has none.
+local STATUS_ORDER = { needs = 1, working = 2, progress = 3, review = 4, idle = 5, done = 6 }
+local function statusOf(item)
+	if item.is_main then return nil end
+	local pr = item.pr
+	local live = pr and (pr.state == "open" or pr.state == "draft")
+	if item.agent == "waiting" or item.conflicts or (live and (pr.checks == "failing" or pr.review == "changes")) then
+		return "needs"
+	end
+	if item.agent == "working" then return "working" end
+	if pr and (pr.state == "merged" or pr.state == "closed") then return "done" end
+	if pr and pr.state == "open" then return "review" end
+	if item.dirty or (item.base and item.base.ahead > 0) or (pr and pr.state == "draft") then return "progress" end
+	return "idle"
+end
+
+-- When each worktree was last in use in this window (Unix seconds): its session
+-- shown or an agent active in it. With its last commit, it orders the rows.
+local seen = {}
+
 local function model(cx)
 	local sessions = sessionsById(cx)
 	local names = records("worktree-names")
 	local bindings, jobs = records("sessions"), records("jobs")
-	local icebox = records("icebox")
-	local showIcebox = tern.kv.get("show-icebox") ~= false
 	local activity = agentActivity(cx)
 	local tabs = tabRows(cx, activity)
 	local result = {
-		projects = {}, collapsed = collapsed, confirmation = confirmation,
-		showIcebox = showIcebox, refreshing = spinning,
+		projects = {}, collapsed = collapsed, confirmation = confirmation, refreshing = spinning,
 	}
 	local current = cx.sessions:current()
+	local now = os.time()
 	for _, project in projects() do
 		local entry = cache[project.id]
 		local row = {
 			id = project.id, name = project.name, path = project.path, base = project.base,
-			loading = not entry or entry.loading, error = entry and entry.error, worktrees = {}, hiddenIced = 0,
+			loading = not entry or entry.loading, error = entry and entry.error, worktrees = {},
 			total = entry and entry.worktrees and #entry.worktrees or 0,
 		}
-		local iced = {}
+		local items, byBranch = {}, {}
 		for _, worktree in (entry and entry.worktrees or {}) do
 			local item = table.clone(worktree)
 			item.deleting = removing(worktree.path, jobs)
@@ -256,18 +279,51 @@ local function model(cx)
 			item.agent = session and activity.sessions[tostring(session.id)]
 			local active = session ~= nil and session.id == current.id
 			if active then result.activePath = worktree.path end
-			item.iced = not worktree.is_main and icebox[project.id] ~= nil and icebox[project.id][worktree.path] == true
-			if not item.iced then
-				table.insert(row.worktrees, item)
-			elseif showIcebox or active then
-				-- The active worktree stays visible even while the Ice Box is hidden.
-				table.insert(iced, item)
+			if active or item.agent then seen[worktree.path] = now end
+			item.status = statusOf(item)
+			item.activity = math.max(seen[worktree.path] or 0, worktree.committed or 0)
+			-- A merged PR's worktree has done its job: offer to delete it.
+			item.offerDelete = item.pr ~= nil and item.pr.state == "merged" and not item.deleting
+				and not item.dirty and not item.is_main
+			table.insert(items, item)
+			if worktree.branch then byBranch[worktree.branch] = item end
+		end
+		-- Stacked work: a branch's parent is the one it was created on (forge-parent),
+		-- else the base of its PR when another worktree here has that branch.
+		local children, roots = {}, {}
+		for _, item in items do
+			local parentBranch = item.parent_branch or (item.pr and item.pr.base)
+			local parent = not item.is_main and parentBranch and parentBranch ~= project.base
+				and parentBranch ~= item.branch and byBranch[parentBranch] or nil
+			if parent and not parent.is_main then
+				item.parentName = parent.displayName or parent.branch
+				children[parent.path] = children[parent.path] or {}
+				table.insert(children[parent.path], item)
 			else
-				row.hiddenIced += 1
+				table.insert(roots, item)
 			end
 		end
-		-- Ice Box worktrees sink to the bottom, keeping their relative order.
-		for _, item in iced do table.insert(row.worktrees, item) end
+		local function before(a, b)
+			if a.is_main ~= b.is_main then return a.is_main end
+			local ra, rb = STATUS_ORDER[a.status] or 0, STATUS_ORDER[b.status] or 0
+			if ra ~= rb then return ra < rb end
+			if a.activity ~= b.activity then return a.activity > b.activity end
+			return (a.branch or a.path) < (b.branch or b.path)
+		end
+		table.sort(roots, before)
+		local placed = {}
+		local function place(item, depth)
+			if placed[item.path] then return end
+			placed[item.path] = true
+			item.depth = depth
+			table.insert(row.worktrees, item)
+			local kids = children[item.path] or {}
+			table.sort(kids, before)
+			for _, kid in kids do place(kid, math.min(depth + 1, 3)) end
+		end
+		for _, item in roots do place(item, 0) end
+		-- A parent cycle leaves rows unplaced; they still show, at the top level.
+		for _, item in items do place(item, 0) end
 		table.insert(result.projects, row)
 	end
 	return result
@@ -341,6 +397,71 @@ end
 
 local PR_REFRESH_MS = 120000
 
+-- What the Open box suggests beyond existing worktrees: this project's open PRs
+-- that are yours or wait for your review, and (once for all projects) your open
+-- Linear issues. Refreshed in the background with the PR badges, so typing in the
+-- box never waits on the network.
+local function refreshSuggestions(project, entry)
+	if not entry.mineLoading and not (entry.mineAt and tern.now() - entry.mineAt < PR_REFRESH_MS) then
+		entry.mineLoading = true
+		wt.my_pull_requests(project, function(found, err, cx)
+			entry.mineLoading, entry.mineAt = false, tern.now()
+			if found then
+				entry.mine, entry.github = found.prs, found.repo
+			elseif err ~= entry.mineError then
+				tern.log.warn("Open box: pull requests unavailable for " .. project.name .. ": " .. tostring(err))
+			end
+			entry.mineError = err
+		end)
+	end
+	if linear.connected() and not myIssues.loading and not (myIssues.at and tern.now() - myIssues.at < PR_REFRESH_MS) then
+		myIssues.loading = true
+		linear.my_issues(function(issues, err)
+			myIssues.loading, myIssues.at = false, tern.now()
+			if issues then myIssues.issues = issues end
+			if err and err ~= myIssues.error then tern.log.warn("Open box: Linear issues unavailable: " .. tostring(err)) end
+			myIssues.error = err
+		end)
+	end
+end
+
+-- Tickets move along with the work, forward only: a worktree is created (In
+-- Progress), its PR is opened (In Review, when the team has a review state), its
+-- PR is merged (Done). Each stage is applied once per ticket; Linear's own
+-- GitHub automation may get there first, which the forward-only rule respects.
+local STAGE_RANK = { started = 1, review = 2, completed = 3 }
+local function advanceTicket(ticket, stage)
+	local id = ticket and string.match(string.upper(ticket), "(%u[%u%d]*%-%d+)")
+	if not id or not linear.connected() then return end
+	local moved = records("linear-stages")
+	if (moved[id] or 0) >= STAGE_RANK[stage] then return end
+	moved[id] = STAGE_RANK[stage]
+	tern.kv.set("linear-stages", moved)
+	linear.advance(id, stage, function(state, err, cx)
+		if err then
+			tern.log.warn("Linear: could not move " .. id .. ": " .. tostring(err))
+			local again = records("linear-stages")
+			again[id] = nil
+			tern.kv.set("linear-stages", again)
+		elseif state and cx then
+			cx:toast("info", id .. " → " .. state, "Linear")
+		end
+	end)
+end
+
+-- A worktree's PR moving to open or merged moves its ticket.
+local function advanceFromPullRequests(project, entry)
+	for _, tree in entry.worktrees do
+		local pr = tree.branch and not tree.is_main and entry.prs and entry.prs[tree.branch]
+		local ticket = pr and ticketFor(project, tree)
+		if ticket then
+			if pr.state == "merged" then advanceTicket(ticket.id, "completed")
+			elseif pr.state == "open" then advanceTicket(ticket.id, "review") end
+		end
+	end
+end
+
+
 -- Pull request badges are best-effort: without gh, GitHub access, or a GitHub
 -- origin they simply don't appear. Stale results stay visible until a lookup
 -- succeeds again.
@@ -357,7 +478,16 @@ local function refreshPullRequests(project, entry)
 	wt.pull_requests(project, branches, function(found, err, cx)
 		entry.prLoading, entry.prAt = false, tern.now()
 		if found then
+			local before = entry.prs
 			entry.prs, entry.prKey, entry.prError = found, key, nil
+			advanceFromPullRequests(project, entry)
+			-- A PR that just merged: its worktree's Delete offer appears; say so once.
+			for branch, pr in found do
+				local old = before and before[branch]
+				if cx and pr.state == "merged" and old and old.state ~= "merged" then
+					cx:toast("info", "PR #" .. tostring(pr.number) .. " merged", notificationLabel(branch .. " · Delete is on its row"))
+				end
+			end
 		elseif err ~= entry.prError then
 			entry.prError = err
 			tern.log.warn("Pull requests unavailable for " .. project.name .. ": " .. tostring(err))
@@ -369,6 +499,17 @@ end
 local function inferLinear()
 	if linearDefault ~= nil then return end
 	linearDefault = false
+	if linear.connected() then
+		linear.viewer(function(me, err, cx)
+			if me and me.workspace then
+				linearDefault = me.workspace
+				if cx then redraw(cx) end
+			else
+				tern.log.info("Linear workspace unavailable: " .. tostring(err))
+			end
+		end)
+		return
+	end
 	wt.linear_workspace(function(slug, err, cx)
 		if slug then
 			linearDefault = slug
@@ -399,7 +540,10 @@ local function refresh(cx, done)
 				pending -= 1
 				if pending == 0 and done and nextCx then done(nextCx) end
 				if nextCx then redraw(nextCx) end
-				if worktrees then refreshPullRequests(project, entry) end
+				if worktrees then
+					refreshPullRequests(project, entry)
+					refreshSuggestions(project, entry)
+				end
 			end)
 		end
 	end
@@ -958,30 +1102,61 @@ end
 
 -- Forms take the Projects panel's place, like a page within it, and follow you
 -- the same way; finishing or going back puts the panel back.
--- What the Open box suggests from as you type: every worktree, with its display
--- name, ticket and PR, those in `project` first.
+-- What the Open box suggests from as you type, and what it needs to prefill an
+-- agent prompt. Items, those in `project` first: every worktree (kind
+-- "worktree"), then this project's open PRs that are yours or wait for your
+-- review ("pr"), then your open Linear issues ("ticket"); PRs and tickets that
+-- already have a worktree here are left out, the worktree stands for them.
 local function openCandidates(project)
 	local names = records("worktree-names")
 	local here, others = {}, {}
+	-- A ticket is anyone's, a branch this repository's: a worktree in any project
+	-- stands for its ticket, only one here for a PR's branch.
+	local branchesHere, ticketsHere = {}, {}
 	for _, p in projects() do
 		local entry = cache[p.id]
 		local isHere = project ~= nil and p.id == project.id
 		for _, tree in (entry and entry.worktrees or {}) do
 			local ticket = ticketFor(p, tree)
 			local pr = tree.branch and entry.prs and entry.prs[tree.branch] or nil
+			if isHere and tree.branch then branchesHere[tree.branch] = true end
+			if ticket then ticketsHere[ticket.id] = true end
 			table.insert(if isHere then here else others, {
-				path = tree.path, project = p.name, here = isHere,
+				kind = "worktree", path = tree.path, project = p.name, here = isHere,
 				branch = tree.branch, primary = tree.is_main == true,
 				name = names[p.id] and names[p.id][tree.path] or tree.orca and tree.orca.name,
 				ticket = ticket and ticket.id, pr = pr and pr.number, prState = pr and pr.state,
 			})
 		end
 	end
+	local entry = project and cache[project.id]
+	for _, pr in (entry and entry.mine or {}) do
+		if not branchesHere[pr.branch] then
+			table.insert(here, {
+				kind = "pr", here = true, pr = pr.number, name = pr.title, branch = pr.branch, url = pr.url,
+				prState = if pr.draft then "draft" else "open",
+				why = if pr.review then "review requested" else "yours",
+			})
+		end
+	end
+	for _, issue in (myIssues.issues or {}) do
+		if not ticketsHere[issue.id] then
+			table.insert(here, {
+				kind = "ticket", here = true, ticket = issue.id, name = issue.title, url = issue.url, why = issue.state,
+			})
+		end
+	end
 	table.move(others, 1, #others, #here + 1, here)
-	return tern.json.array(here)
+	return {
+		items = tern.json.array(here),
+		github = entry and entry.github,
+		workspace = project and (project.linear or linearDefault) or nil,
+		linear = linear.connected(),
+	}
 end
 
-local function openForm(cx, mode, project, worktree)
+-- `parent`: a worktree to stack the new work on (its branch becomes the base).
+local function openForm(cx, mode, project, worktree, parent)
 	if not requireLocal(cx) then return end
 	if worktree and removing(worktree.path) then report(cx, "This worktree is being deleted."); return end
 	local current, kind = slot(cx)
@@ -994,19 +1169,24 @@ local function openForm(cx, mode, project, worktree)
 		-- Opening the panel and swapping it in one callback risks Tern's 50 ms budget.
 		if not navigator(cx) then return end
 		tern.timer(0, function(nextCx)
-			if nextCx and slot(nextCx) then openForm(nextCx, mode, project, worktree) end
+			if nextCx and slot(nextCx) then openForm(nextCx, mode, project, worktree, parent) end
 		end)
 		return
 	end
 	local names = worktree and records("worktree-names")[project.id]
 	local id = token()
-	if mode == "open" then tern.kv.set("form-data:" .. id, openCandidates(project)) end
+	if mode == "open" then
+		local data = openCandidates(project)
+		data.parent = parent and parent.branch
+		tern.kv.set("form-data:" .. id, data)
+	end
 	local pane = swapSlot(cx, current, function()
 		return cx:new_block("forge.form", {
 			id, mode,
 			if worktree then worktree.branch or "Detached HEAD" else project and project.name or "",
 			if worktree then names and names[worktree.path] or ""
 				elseif mode == "linear" then project.linear or ""
+				elseif parent then parent.branch
 				else project and project.base or "",
 			if mode == "open" and project then wt.creation_note(project) else "",
 		}, "beside")
@@ -1014,6 +1194,7 @@ local function openForm(cx, mode, project, worktree)
 	if not pane then report(cx, "Reload the Forge plugin.", "Form unavailable"); return end
 	tern.kv.set("pending-form:" .. tostring(pane), {
 		token = id, mode = mode, project = project and project.id, path = worktree and worktree.path,
+		parent = parent and parent.branch,
 	})
 	watchForms()
 end
@@ -1270,7 +1451,7 @@ local function launchCreation(cx, project, job)
 	if job.checkout then
 		ready, command = pcall(wt.checkout_command, project, job.branch, job.pr, receipt)
 	else
-		ready, command = pcall(wt.creation_command, project, job.branch, receipt)
+		ready, command = pcall(wt.creation_command, project, job.branch, receipt, job.base)
 	end
 	if not ready then return command end
 	-- A background tab: the panel stays in front while setup runs.
@@ -1285,20 +1466,41 @@ local function launchCreation(cx, project, job)
 	return nil
 end
 
+-- Starts an omp agent with `prompt` in the worktree at `path`, opening its session.
+local function startAgentIn(cx, path, prompt)
+	local project, worktree = findWorktree(path)
+	if not project then report(cx, "Worktree not found. Refresh Projects.", "Agent not started"); return end
+	ensureSession(cx, project, path, worktree.branch)
+	local ok, err = pcall(function()
+		cx.agents:start({ prompt = prompt, cwd = path, command = "omp", how = "tab" })
+	end)
+	if not ok then report(cx, err, "Agent not started") end
+	redraw(cx)
+end
+
 -- The Open box: a picked worktree opens; typed text is resolved, in order, as a
 -- worktree already there (by path, branch, ticket or PR), a pull request (#42 or
 -- its URL: checked out from GitHub), a ticket (ENG-123 or a Linear URL: branch
 -- feature/ENG-123, linked), or a branch name (checked out if it exists locally or
--- on origin, else created from the base). New worktrees open once they're ready.
+-- on origin, else created from the base, or from the parent's branch when
+-- stacking). "New Linear ticket" creates the issue first and continues as a
+-- ticket. New worktrees open once they're ready; with a prompt, an agent starts
+-- there, its "{ticket}" replaced by the ticket's link.
 local function startOpenJob(cx, pane, project, spec)
 	local launchError = launchCreation(cx, project, {
 		branch = spec.branch, displayName = spec.displayName, open = true,
-		checkout = spec.checkout, pr = spec.pr,
+		checkout = spec.checkout, pr = spec.pr, base = spec.parent,
+		agentPrompt = spec.prompt, ticket = spec.ticket,
 	})
 	if launchError then rejectForm(cx, pane, launchError); return end
 	if spec.ticket then
 		wt.set_ticket(project, spec.branch, spec.ticket, function(ok, err)
 			if not ok then tern.log.warn("Ticket link not saved for " .. spec.branch .. ": " .. tostring(err)) end
+		end)
+	end
+	if spec.parent then
+		wt.set_parent(project, spec.branch, spec.parent, function(ok, err)
+			if not ok then tern.log.warn("Parent not saved for " .. spec.branch .. ": " .. tostring(err)) end
 		end)
 	end
 	finishForm(cx, pane)
@@ -1307,20 +1509,49 @@ local function startOpenJob(cx, pane, project, spec)
 	redraw(cx)
 end
 
-local function openExisting(cx, pane, path)
+local function openExisting(cx, pane, path, prompt)
 	finishForm(cx, pane)
-	openWorktree(cx, path)
+	if prompt then startAgentIn(cx, path, prompt) else openWorktree(cx, path) end
+end
+
+-- The Linear team new tickets go to: the one most of this project's linked
+-- tickets belong to (ENG-1, ENG-2 → ENG), else Linear's first team for you.
+local function teamFor(project)
+	local counts, best = {}, nil
+	for _, tree in (cache[project.id] and cache[project.id].worktrees or {}) do
+		local ticket = ticketFor(project, tree)
+		local team = ticket and string.match(ticket.id, "^(%u[%u%d]*)%-")
+		if team then
+			counts[team] = (counts[team] or 0) + 1
+			if not best or counts[team] > counts[best] then best = team end
+		end
+	end
+	return best
 end
 
 local function openFromForm(cx, pane, request, response)
 	tern.kv.set("form-data:" .. request.token, nil)
-	if type(response.path) == "string" then openExisting(cx, pane, response.path); return end
+	local prompt = if type(response.prompt) == "string" and string.find(response.prompt, "%S") then response.prompt else nil
+	if type(response.path) == "string" then openExisting(cx, pane, response.path, prompt); return end
 	local project = projectById(request.project)
 	if not project then rejectForm(cx, pane, "Project is no longer registered."); return end
 	local query = (if type(response.query) == "string" then response.query else ""):match("^%s*(.-)%s*$")
 	if query == "" then rejectForm(cx, pane, "Enter a branch, ticket or pull request."); return end
 	local displayName, nameError = normalizeName(response.name)
 	if nameError then rejectForm(cx, pane, nameError); return end
+	local parent = if type(request.parent) == "string" then request.parent else nil
+
+	if response.newTicket then
+		linear.create(query, teamFor(project), function(issue, err, nextCx)
+			if not nextCx then return end
+			if not issue then rejectForm(nextCx, pane, err); return end
+			nextCx:toast("info", "Linear ticket created", notificationLabel(issue.id .. " " .. issue.title))
+			openFromForm(nextCx, pane, request, {
+				query = issue.url, name = response.name or issue.title, prompt = response.prompt,
+			})
+		end)
+		return
+	end
 
 	local rows = linkRows()
 	-- The worktree the key names in this project. Links (a PR or Linear URL) and
@@ -1334,8 +1565,15 @@ local function openFromForm(cx, pane, request, response)
 		if #here == 1 then return here[1] end
 		return if #here == 0 and global and #hits == 1 then hits[1] else nil
 	end
+	local function withLink(text, link)
+		return text and link and (string.gsub(text, "{ticket}", function() return link end)) or text
+	end
 	local found = existing(matchRows(rows, query))
-	if found then openExisting(cx, pane, found.worktree); return end
+	if found then
+		local link = found.ticket and (found.ticket.url or found.ticket.id)
+		openExisting(cx, pane, found.worktree, withLink(prompt, link))
+		return
+	end
 
 	local function onBranch(branch)
 		for _, row in rows do
@@ -1350,10 +1588,10 @@ local function openFromForm(cx, pane, request, response)
 			if not nextCx then return end
 			if not pr then rejectForm(nextCx, pane, err); return end
 			local row = onBranch(pr.branch)
-			if row then openExisting(nextCx, pane, row.worktree); return end
+			if row then openExisting(nextCx, pane, row.worktree, prompt); return end
 			startOpenJob(nextCx, pane, project, {
 				branch = pr.branch, checkout = true, pr = pr.number,
-				displayName = displayName or pr.title,
+				displayName = displayName or pr.title, prompt = prompt,
 			})
 		end)
 		return
@@ -1364,20 +1602,29 @@ local function openFromForm(cx, pane, request, response)
 		else string.match(upper, "^(%u[%u%d]*%-%d+)$")
 	local branch = if ticket then "feature/" .. ticket else query
 	local link = if ticket then (if string.match(query, "^https?://") then query else ticket) else nil
+	local workspace = project.linear or linearDefault
+	local ticketUrl = if link and string.match(link, "^https?://") then link
+		elseif ticket and workspace then "https://linear.app/" .. workspace .. "/issue/" .. ticket
+		else ticket
+	prompt = withLink(prompt, ticketUrl)
 	local row = onBranch(branch)
-	if row then openExisting(cx, pane, row.worktree); return end
+	if row then openExisting(cx, pane, row.worktree, prompt); return end
 	wt.branch_location(project, branch, function(where, _err, nextCx)
 		if not nextCx then return end
 		if not nextCx.session:pane(pane) then finishForm(nextCx, pane); return end
 		if where then
-			startOpenJob(nextCx, pane, project, { branch = branch, checkout = true, displayName = displayName, ticket = link })
+			startOpenJob(nextCx, pane, project, {
+				branch = branch, checkout = true, displayName = displayName, ticket = link, prompt = prompt,
+			})
 			return
 		end
 		wt.validate(project, branch, function(ok, err, validCx)
 			if not validCx then return end
 			if not ok then rejectForm(validCx, pane, err); return end
-			startOpenJob(validCx, pane, project, { branch = branch, displayName = displayName, ticket = link })
-		end)
+			startOpenJob(validCx, pane, project, {
+				branch = branch, displayName = displayName, ticket = link, prompt = prompt, parent = parent,
+			})
+		end, parent)
 	end)
 end
 
@@ -1617,11 +1864,6 @@ local function checkJobs(cx)
 						names[job.project][job.path] = nil
 						tern.kv.set("worktree-names", names)
 					end
-					local icebox = records("icebox")
-					if icebox[job.project] then
-						icebox[job.project][job.path] = nil
-						tern.kv.set("icebox", icebox)
-					end
 					local closed, closeError = true, nil
 					if job.session then closed, closeError = closeManagedSession(cx, job.path, job.session) end
 					if closed then
@@ -1639,6 +1881,7 @@ local function checkJobs(cx)
 				local label = job.displayName or job.branch
 				if status == 0 then
 					cx:toast("info", "Worktree created", notificationLabel(label))
+					if job.ticket then advanceTicket(job.ticket, "started") end
 					startTicketAgent(job)
 					if job.open then openCreated(job) end
 				else
@@ -1655,6 +1898,34 @@ end
 
 tern.command({ id = "projects", title = "Show or hide Projects", icon = "branch", keys = { "cmd+alt+shift+p" }, run = togglePanel })
 tern.command({ id = "add", title = "Add project", icon = "folder", run = function(cx) pickProject(cx) end })
+tern.command({
+	id = "linear-connect", title = "Connect Linear (personal API key)", icon = "link",
+	run = function(cx)
+		cx:prompt({
+			placeholder = "Linear personal API key (Settings → Security & access → Personal API keys)",
+			icon = "link", action = "connect",
+		}):next(function(value, _err, promptCx)
+			if not promptCx or type(value) ~= "string" or not string.find(value, "%S") then return end
+			linear.connect(value:match("^%s*(.-)%s*$"), function(me, err, doneCx)
+				if not doneCx then return end
+				if not me then report(doneCx, err, "Linear not connected"); return end
+				linearDefault, myIssues = nil, {}
+				doneCx:toast("info", "Linear connected", notificationLabel(me.name .. (if me.workspace then " · " .. me.workspace else "")))
+				refresh(doneCx)
+			end)
+		end)
+	end,
+})
+tern.command({
+	id = "linear-disconnect", title = "Disconnect Linear", icon = "link",
+	available = function() return linear.connected() end,
+	run = function(cx)
+		linear.disconnect(function(_ok, doneCx)
+			myIssues = {}
+			if doneCx then doneCx:toast("info", "Linear disconnected", "The API key was removed from the keychain.") end
+		end)
+	end,
+})
 tern.command({
 	id = "add-orca", title = "Add project from Orca", icon = "folder",
 	available = function() return wt.orca_available() end,
@@ -1708,7 +1979,7 @@ tern.carly.export("ticket_worktree", {
 		if call.cancelled or not nextCx then return end
 		if not ok then call:fail(err); return end
 		local launchError = launchCreation(nextCx, project, {
-			branch = branch, agentPrompt = string.format(TICKET_PROMPT, ticket),
+			branch = branch, agentPrompt = string.format(TICKET_PROMPT, ticket), ticket = ticket,
 		})
 		if launchError then call:fail(launchError); return end
 		-- The branch is linked to its ticket before it exists: git config doesn't mind.
@@ -1796,18 +2067,13 @@ tern.on("canvas_action", function(ev, cx)
 		local project = projectById(ev.value)
 		if project then openForm(cx, "open", project) end
 	elseif ev.act == "open" then openWorktree(cx, ev.value)
-	elseif ev.act == "Add to Ice Box" or ev.act == "Remove from Ice Box" then
-		-- Menu entries show their action verbatim, so these read as titled.
+	elseif ev.act == "New stacked worktree" then
+		-- Menu entries show their action verbatim, so this one reads as titled.
 		local project, worktree = findWorktree(view.worktreePath(ev.node))
-		if not project then report(cx, "Worktree not found. Refresh Projects."); return true end
-		local icebox = records("icebox")
-		icebox[project.id] = icebox[project.id] or {}
-		icebox[project.id][worktree.path] = if ev.act == "Add to Ice Box" then true else nil
-		tern.kv.set("icebox", icebox)
-		redraw(cx)
-	elseif ev.act == "toggle-icebox" then
-		tern.kv.set("show-icebox", tern.kv.get("show-icebox") == false)
-		redraw(cx)
+		if project and worktree.branch then openForm(cx, "open", project, nil, worktree)
+		else report(cx, "Worktree not found. Refresh Projects.") end
+	elseif ev.act == "delete" then
+		requestWorktreeAction(cx, "delete", ev.value)
 	elseif ev.act == "Change base branch" or ev.act == "Set Linear workspace" then
 		local project = projectById(view.projectId(ev.node))
 		if project then openForm(cx, if ev.act == "Change base branch" then "base" else "linear", project)
@@ -1910,6 +2176,14 @@ local function tick(cx)
 	end
 	tern.timer(750, tick)
 end
+
+-- The Ice Box is gone (Done rows sink to the bottom instead); drop what it stored.
+tern.kv.set("icebox", nil)
+tern.kv.set("show-icebox", nil)
+
+linear.load(function(connected, cx)
+	if connected and cx then refresh(cx) end
+end)
 
 tern.on("window_start", function(cx)
 	refresh(cx)

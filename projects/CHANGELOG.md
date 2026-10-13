@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.3.0 (2026-10-13)
+
+### Added
+
+- **The Open box finds work you haven't started.** Besides existing worktrees, it lists the repository's open PRs that are yours or wait for your review, and your open Linear issues. Both are refreshed in the background every two minutes, so typing never waits on the network; Enter on one checks it out or creates its worktree. PRs and tickets that already have a worktree are left out: the worktree stands for them.
+- **Linear, connected.** **Connect Linear (personal API key)** stores a key in the system keychain. Tickets then move forward with the work: In Progress when their worktree is created, In Review when the PR opens, Done when it merges. Each move happens once and only forward, so Linear's own automation and your changes win. Text with spaces in the Open box is a title: Enter creates a Linear issue, assigned to you, and its worktree.
+- **An agent from the box.** The box's last field is an agent prompt, prefilled from the row you pick: a ticket's prompt links the ticket and asks for questions first, a PR's links the PR and asks for a review. Empty starts no agent.
+- **Status you don't set.** Each row shows where it stands, worked out from the agent, Git, the PR, CI and review: **needs you** (agent waiting, conflicts, failing CI, changes requested), working, in progress, in review, done. Rows are ordered by it, then by when you last used or committed to them.
+- **Stacked worktrees.** **New stacked worktree** on a row opens the box on top of it: the new branch starts from its branch, is recorded as its child (`branch.<child>.forge-parent`) and shows indented under it. A PR whose base is another worktree's branch is shown as its child too.
+- **Merged worktrees offer to go.** A worktree whose PR merged shows **Delete** on its row (it still asks first), and a toast says so when the merge is seen.
+- **Submodules.** New worktrees get their submodules initialized. Deleting one with submodules works (Git needs `--force` for it) after checking every submodule for uncommitted changes and for commits that aren't on its remote.
+
+### Removed
+
+- **Breaking: the Ice Box.** Done work now sinks to the bottom on its own, and merged worktrees offer to be deleted. The `icebox` and `show-icebox` keys are dropped when Forge loads.
+
 ## 3.2.0 (2026-10-13)
 
 ### Changed
