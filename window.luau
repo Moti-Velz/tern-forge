@@ -197,5 +197,24 @@ tern.bind("cmd+shift+a", "new_agent_block")
 -- Super+Shift+P: Tern's own "New browser block".
 tern.bind("cmd+shift+p", "new_browser_block")
 
+-- ── Forge companion: Super+B ────────────────────────────────────────────────────────────────
+-- Forge's Projects sidebar. A plugin can't run another plugin's command (`plugin.forge.projects` is
+-- "unknown" to both `cx:action` and `cx.actions:run`), so the sidebar is driven through Forge's own
+-- key, Super+Alt+Shift+P: on Tern, Hyprland turns Super+B into it. Coming from another window,
+-- Hyprland brings Tern forward and sends Super+Ctrl+Shift+B, "show Projects": focus the sidebar
+-- if it is open, else have Hyprland press Forge's key.
+
+local function show_projects(cx: WindowCx)
+	for _, c in cx.canvas:list() do
+		if c.owner == "forge" and c.title == "Projects" and cx.session:pane(c.pane) then
+			cx.layout:focus(c.pane)
+			return
+		end
+	end
+	hypr.press("SUPER ALT SHIFT", "P")
+end
+
+tern.bind("cmd+ctrl+shift+b", show_projects)
+
 agents.start()
 heartbeat.start()

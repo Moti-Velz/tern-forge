@@ -23,6 +23,17 @@ function Hypr.dispatch(expr: string)
 	run({ "hyprctl", "dispatch", expr })
 end
 
+-- Presses `mods + key` in the active window, the way Hyprland's binds inject chords (down, then up).
+function Hypr.press(mods: string, key: string)
+	local function state(s: string): string
+		return string.format('hl.dsp.send_key_state({ mods = "%s", key = "%s", state = "%s" })', mods, key, s)
+	end
+	Hypr.dispatch(state("down"))
+	tern.timer(30, function()
+		Hypr.dispatch(state("up"))
+	end)
+end
+
 -- The active window as `hyprctl activewindow -j` reports it (class, size, …); nil when there is none.
 function Hypr.active(done: (window: any?, cx: WindowCx) -> ())
 	run({ "hyprctl", "activewindow", "-j" }, function(ok, out, cx)

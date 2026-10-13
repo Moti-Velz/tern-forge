@@ -134,3 +134,20 @@ end)
 tern_or("SUPER + SHIFT + P", "New Tern browser, else Google Photos", "SUPER + SHIFT", "P", function()
   hl.dispatch(hl.dsp.exec_cmd(o.launch_webapp_sole("Google Photos", "https://photos.google.com/")))
 end)
+
+-- New (unbound in Omarchy): Forge's Projects sidebar. On Tern it presses Forge's own key
+-- (Super+Alt+Shift+P), which toggles the sidebar; from any other window it brings forward the Tern
+-- window you used last and sends Super+Ctrl+Shift+B, which shows Projects there (focuses it when
+-- it is already open).
+tern_or("SUPER + B", "Forge Projects sidebar", "SUPER + ALT + SHIFT", "P", function()
+  local best
+  for _, window in ipairs(hl.get_windows({ class = TERN_CLASS })) do
+    if is_tern(window) and (best == nil or window.focus_history_id < best.focus_history_id) then
+      best = window
+    end
+  end
+  if best then
+    hl.dispatch(hl.dsp.focus({ window = "address:" .. best.address }))
+    send("SUPER + CTRL + SHIFT", "B")
+  end
+end)

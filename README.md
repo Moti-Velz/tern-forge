@@ -19,9 +19,18 @@ Makes Tern feel native on [Omarchy](https://omarchy.org/):
 | Super+Return | New shell pane in the focused pane's directory, split along its longer side | Terminal |
 | Super+Shift+A | New agent block | ChatGPT |
 | Super+Shift+P | New browser block | Google Photos |
+| Super+B | Toggle [Forge](https://github.com/Moti-Velz/tern-forge)'s Projects sidebar | Bring the last Tern window forward and show Projects there |
 
 When focus moves onto Tern from another window, Tern focuses the pane on the edge you came in
 through. If you're coming back to the pane you left, it keeps that one.
+
+## Forge companion
+
+With [Forge](https://github.com/Moti-Velz/tern-forge) installed, Super+B is its Projects sidebar,
+from anywhere. Forge keeps its own key, Super+Alt+Shift+P, and Super+B presses that key for you:
+plugins can't run each other's commands, so the key is the only way in. If you rebind Forge's key,
+change `SUPER + ALT + SHIFT`, `P` in `hypr/tern-nav.lua` and `lib/hypr.luau`'s `press` call in
+`window.luau` to match.
 
 ## How it works
 
