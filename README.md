@@ -78,3 +78,7 @@ The plugin gives Carly two exports and one piece of context:
 | `lib/context.luau` | Pure: dates, speaker labels, the Markdown context document and composer attachment |
 | `lib/view.luau` | Pure: the block's view |
 | `styles.css` | Panel styling (`data-role='granola.*'`) |
+
+## License
+
+MIT — see [LICENSE](LICENSE).
