@@ -1499,8 +1499,160 @@ tern.carly.export("ticket_worktree", {
 	return call:wait(30000)
 end)
 
+-- ── Worktree links for Carly ───────────────────────────────────────────────────
+-- The same store the panel and `forge-links` (bin/) use: each worktree, the ticket
+-- linked to its branch (git config branch.<branch>.forge-ticket) and the branch's PR,
+-- looked up by any key on hand. Answered from the panel's cache, refreshed every 15 s.
+
+local function linkRows()
+	local out = {}
+	for _, project in projects() do
+		local entry = cache[project.id]
+		for _, tree in (entry and entry.worktrees or {}) do
+			local ticket = ticketFor(project, tree)
+			local pr = tree.branch and entry.prs and entry.prs[tree.branch] or nil
+			table.insert(out, {
+				project = project.name, repo = project.path, worktree = tree.path,
+				branch = tree.branch, primary = tree.is_main == true,
+				ticket = ticket and { id = ticket.id, url = ticket.url, link = tree.ticket_link },
+				pr = pr and { number = pr.number, state = pr.state, url = pr.url },
+			})
+		end
+	end
+	return out
+end
+
+-- Rows a key names: a PR URL or number (42, #42), a worktree path (or a path inside
+-- one; the innermost worktree wins), a Linear id or URL (linked first, else a branch
+-- naming it), else a branch name.
+local function matchRows(rows, key)
+	key = key:match("^%s*(.-)%s*$")
+	local found = {}
+	local repoPart, prNumber = string.match(key, "github%.com/([^/]+/[^/]+)/pull/(%d+)")
+	local number = tonumber(prNumber or string.match(key, "^#?(%d+)$"))
+	if number then
+		for _, row in rows do
+			if row.pr and row.pr.number == number
+				and (not repoPart or string.find(string.lower(row.pr.url or ""), string.lower(repoPart), 1, true)) then
+				table.insert(found, row)
+			end
+		end
+		return found
+	end
+	if string.sub(key, 1, 1) == "/" or string.sub(key, 1, 1) == "~" then
+		local path = if string.sub(key, 1, 1) == "~" then (tern.getenv("HOME") or "") .. string.sub(key, 2) else key
+		path = path:gsub("/+$", "")
+		local best
+		for _, row in rows do
+			if (path == row.worktree or string.sub(path, 1, #row.worktree + 1) == row.worktree .. "/")
+				and (not best or #row.worktree > #best.worktree) then
+				best = row
+			end
+		end
+		return if best then { best } else {}
+	end
+	local upper = string.upper(key)
+	local ticket = if string.find(key, "linear.app", 1, true) then string.match(upper, "(%u[%u%d]*%-%d+)")
+		else string.match(upper, "^(%u[%u%d]*%-%d+)$")
+	if ticket then
+		for _, row in rows do
+			if row.ticket and row.ticket.id == ticket and row.ticket.link then table.insert(found, row) end
+		end
+		if #found > 0 then return found end
+		for _, row in rows do
+			if row.branch and ticketOf(row.branch) == ticket then table.insert(found, row) end
+		end
+		return found
+	end
+	for _, row in rows do
+		if row.branch == key then table.insert(found, row) end
+	end
+	return found
+end
+
+-- Export arguments come first, then cx and the call; optional ones may be absent.
+local function exportArgs(...)
+	local args = table.pack(...)
+	return { table.unpack(args, 1, args.n - 2) }, args[args.n - 1], args[args.n]
+end
+
+-- Runs `done` once the cache is at most 15 s old (the panel's own cadence) and
+-- pull requests have settled. The panel refreshes only while it's open, so a
+-- question can arrive with nothing listed yet.
+local function whenFresh(cx, done)
+	local deadline = tern.now() + 10000
+	local function settled(c)
+		for _, entry in cache do
+			if entry.loading or entry.prLoading then
+				if tern.now() < deadline then
+					tern.timer(200, function(next) settled(next or c) end)
+					return
+				end
+				break
+			end
+		end
+		done(c)
+	end
+	-- One turn first: PR listings start right after a worktree listing finishes.
+	local function after(c) tern.timer(50, function(next) settled(next or c) end) end
+	if tern.now() - lastRefresh < 15000 then after(cx) else refresh(cx, function(doneCx) after(doneCx or cx) end) end
+end
+
+tern.carly.export("worktrees", {
+	sig = "(key: string?) -> {{project: string, repo: string, worktree: string, branch: string?, primary: boolean, ticket: {id: string, url: string?, link: string?}?, pr: {number: number, state: string, url: string}?}}",
+	doc = "Forge's worktrees with each branch's linked Linear ticket and pull request. key narrows it to the "
+		.. "worktree(s) it names: a worktree path, branch, ticket id or Linear URL, or PR number or URL. Omitted: all.",
+}, function(...)
+	local args, cx, call = exportArgs(...)
+	local key = args[1]
+	whenFresh(cx, function()
+		local rows = linkRows()
+		if type(key) == "string" and key ~= "" then rows = matchRows(rows, key) end
+		call:reply(tern.json.array(rows))
+	end)
+	return call:wait(30000)
+end)
+
+tern.carly.export("link_ticket", {
+	sig = "(key: string, ticket: string?) -> {project: string, branch: string, ticket: string?}",
+	doc = "Links the worktree a key names (path, branch, ticket id/URL, PR number/URL) to a Linear ticket "
+		.. "(ENG-123 or issue URL), stored as git config branch.<branch>.forge-ticket. ticket omitted or empty unlinks.",
+}, function(...)
+	local args, cx, call = exportArgs(...)
+	local key, ticket = args[1], args[2]
+	if type(key) ~= "string" or key == "" then error("Pass a worktree path, branch, ticket or PR.", 0) end
+	local value = if type(ticket) == "string" then ticket:match("^%s*(.-)%s*$") else ""
+	if value ~= "" and not string.match(value, "^https?://") then
+		value = string.upper(value)
+		if not string.match(value, "^%u[%u%d]*%-%d+$") then error("Expected a ticket id such as ENG-123 or an issue URL.", 0) end
+	end
+	whenFresh(cx, function()
+		local hits = matchRows(linkRows(), key)
+		if #hits ~= 1 then
+			call:fail(if #hits == 0 then "No worktree matches " .. key .. "."
+				else key .. " matches " .. #hits .. " worktrees; pass a path or a PR URL.")
+			return
+		end
+		local row = hits[1]
+		if not row.branch then call:fail(row.worktree .. " has a detached HEAD: there is no branch to link."); return end
+		local project
+		for _, p in projects() do
+			if p.path == row.repo then project = p end
+		end
+		if not project then call:fail("Project not found. Refresh Projects."); return end
+		wt.set_ticket(project, row.branch, value, function(ok, err, nextCx)
+			if not ok then call:fail(tostring(err)); return end
+			call:reply({ project = row.project, branch = row.branch, ticket = if value == "" then nil else value })
+			if nextCx then refresh(nextCx) end
+		end)
+	end)
+	return call:wait(30000)
+end)
+
 tern.carly.context(function()
-	return "Forge creates Linear-ticket worktrees with ticket_worktree. " .. projectNames()
+	return "Forge creates Linear-ticket worktrees with ticket_worktree; worktrees(key) lists worktrees with their "
+		.. "linked ticket and PR (key: path, branch, ticket, or PR), link_ticket(key, ticket) links or unlinks. "
+		.. projectNames()
 end)
 
 tern.on("canvas_action", function(ev, cx)

@@ -41,6 +41,16 @@ local function command_error(label, result)
 	return label .. ": " .. detail
 end
 
+-- A CLI's JSON answer, past any line a wrapper printed before it (a mise shim
+-- prints its tool status to stdout, for instance).
+local function decode_output(text)
+	text = text or ""
+	-- JSON starts a line; a wrapper's colored status line has `[` in its escape codes.
+	local start = if string.match(text, "^%s*[%[{]") then 1 else string.find(text, "\n%s*[%[{]")
+	if not start then error("no JSON in the output", 0) end
+	return tern.json.decode(string.sub(text, start))
+end
+
 local function git(path, args, done)
 	local argv = { "git", "--no-optional-locks", "-C", path }
 	for _, arg in ipairs(args) do
@@ -120,7 +130,7 @@ function M.orca_repos(done)
 	run({ orca, "repo", "list", "--json" }, function(result, err, cx)
 		if not result then done(nil, err, cx); return end
 		if result.status ~= 0 then done(nil, command_error("Orca did not answer", result), cx); return end
-		local ok, value = pcall(tern.json.decode, result.stdout)
+		local ok, value = pcall(decode_output, result.stdout)
 		local rows = ok and type(value) == "table" and type(value.result) == "table" and value.result.repos
 		if type(rows) ~= "table" then done(nil, "Orca returned an unexpected repository list", cx); return end
 		local repos = {}
@@ -385,7 +395,7 @@ local function sort_trees(trees)
 end
 
 local function parse_worktrees(text, project)
-	local value = tern.json.decode(text)
+	local value = decode_output(text)
 	local schema2 = type(value) == "table" and value.schema ~= nil
 	local items = value
 	if schema2 then
@@ -621,7 +631,7 @@ end
 local function overlay_orca(orca, project, trees, done)
 	run({ orca, "worktree", "list", "--repo", "path:" .. project.path, "--json" }, function(result, _err, cx)
 		local ok, value = false, nil
-		if result and result.status == 0 then ok, value = pcall(tern.json.decode, result.stdout) end
+		if result and result.status == 0 then ok, value = pcall(decode_output, result.stdout) end
 		local rows = ok and type(value) == "table" and type(value.result) == "table" and value.result.worktrees
 		if type(rows) == "table" then
 			local byPath = {}
@@ -902,7 +912,7 @@ function M.pull_requests(project, branches, done)
 		run(argv, function(result, run_err, next_cx)
 			if not result then done(nil, run_err, next_cx); return end
 			if result.status ~= 0 then done(nil, command_error("GitHub lookup failed", result), next_cx); return end
-			local ok, value = pcall(tern.json.decode, result.stdout)
+			local ok, value = pcall(decode_output, result.stdout)
 			if not ok or type(value) ~= "table" or type(value.data) ~= "table" then
 				done(nil, "GitHub returned an unexpected response", next_cx)
 				return
@@ -937,7 +947,7 @@ function M.pull_request_meta(project, number, done)
 		run({ gh, "pr", "view", tostring(number), "--repo", repo, "--json", SNAPSHOT_FIELDS }, function(result, run_err, next_cx)
 			if not result then done(nil, run_err, next_cx); return end
 			if result.status ~= 0 then done(nil, command_error("GitHub lookup failed", result), next_cx); return end
-			local ok, meta = pcall(tern.json.decode, result.stdout)
+			local ok, meta = pcall(decode_output, result.stdout)
 			if not ok or type(meta) ~= "table" or type(meta.title) ~= "string" then
 				done(nil, "GitHub returned an unexpected response", next_cx)
 				return

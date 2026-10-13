@@ -105,7 +105,7 @@ On Linux, use the `tern` binary from your Tern install in place of the macOS pat
 - **Rename** changes the row's label (the branch stays as it is)
 - **Add to Ice Box** parks a worktree at the bottom; 🧊 in the header hides or shows parked ones
 - **Close session** stops its programs and closes its tabs (the files stay)
-- **Link ticket** links the worktree's branch to a Linear issue (`ENG-123` or its URL). Leave it empty to unlink. Agents do the same with Git: see [Agents](#agents).
+- **Link ticket** links the worktree's branch to a Linear issue (`ENG-123` or its URL). Leave it empty to unlink. Agents and Carly do the same: see [Agents and Carly](#agents-and-carly).
 - **Delete worktree** removes it with the project's backend. It refuses if there are uncommitted changes. The branch is always kept.
 - On a project: **Change base branch** and **Set Linear workspace**
 
@@ -129,20 +129,34 @@ Forge fetches the PR's metadata and full diff from GitHub, then has omp write an
 
 It's **read-only by construction**: omp runs with only read/grep/glob tools and no shell, so it can't push, comment or edit anything.
 
-## Agents
+## Agents and Carly
 
-Agents link the worktree they're working in to a ticket with one Git command:
+Forge's links (worktree ↔ branch ↔ Linear ticket ↔ pull request) can be listed, looked up and changed from anything you have on hand: a worktree path, branch, ticket id or URL, or PR number or URL.
 
-```bash
-git config "branch.$(git branch --show-current).forge-ticket" ENG-123   # or the issue URL
-```
-
-`skills/link-ticket/SKILL.md` teaches them when and how: checking a link, unlinking, and refusing on a detached HEAD. To make it available to your agents, link it into a skills folder they read:
+**Agents** use `bin/forge-links` (Python 3, plus `git` and `gh`):
 
 ```bash
-ln -s ~/src/tern-forge/skills/link-ticket ~/.agents/skills/link-ticket    # omp and other agents
-ln -s ~/src/tern-forge/skills/link-ticket ~/.claude/skills/link-ticket    # Claude Code
+forge-links list                     # every Forge worktree with its ticket and PR
+forge-links show ENG-123 --json      # where ENG-123 is being worked on
+forge-links show 58                  # which worktree PR #58 belongs to
+forge-links link . ENG-123           # link the worktree you're in
+forge-links unlink ENG-123
 ```
+
+`skills/forge-links/SKILL.md` teaches agents when and how to use it. To install both:
+
+```bash
+ln -s ~/src/tern-forge/bin/forge-links ~/.local/bin/forge-links
+ln -s ~/src/tern-forge/skills/forge-links ~/.agents/skills/forge-links    # omp and other agents
+ln -s ~/src/tern-forge/skills/forge-links ~/.claude/skills/forge-links    # Claude Code
+```
+
+`forge-links` reads Forge's project list from `$FORGE_KV` (default `~/.local/state/tern/plugin-data/forge/kv.json`). Without it, it uses the repository you're in, or `--repo`. Without the command, the ticket store is plain Git: `git config "branch.<branch>.forge-ticket" ENG-123`.
+
+**Carly** has two exports, answered from the panel's data. They refresh first when it's more than 15 s old.
+
+- `await(plugins.forge.worktrees(key?))`: the same rows as `forge-links --json`, narrowed to the worktree(s) `key` names; all of them without a key.
+- `await(plugins.forge.link_ticket(key, ticket?))`: links the worktree `key` names; an empty or missing `ticket` unlinks.
 
 ## How it works
 
@@ -166,7 +180,7 @@ flowchart LR
 - **Worktrunk:** Forge calls `wt` and never passes `--yes`, `--no-hooks` or force flags. Your hooks and approval prompts run in a visible tab.
 - **Plain Git:** `git worktree add` and `git worktree remove`. It runs the repo's `orca.yaml` setup and archive scripts, or, for a repository registered in Orca without one, the setup and archive scripts from Orca's settings.
 - **Orca is read, never written.** With its CLI (`orca-ide`, or `orca` on macOS only, or `$ORCA_CLI_COMMAND`), Forge adds Orca's repositories to Projects. It reads their setup scripts, and each worktree's name, comment, board status and Linear link. Worktrees Orca created are ordinary Git worktrees, so they list like any other.
-- **Ticket links live in Git.** Each branch's ticket is `git config branch.<branch>.forge-ticket` (an id like `ENG-123`, or the issue URL). It's repository-local and never pushed. You set it from the panel (**Link ticket**), agents set it with Git (see `skills/link-ticket`), `ticket_worktree` sets it, and an Orca Linear link is copied in when the branch has none.
+- **Ticket links live in Git.** Each branch's ticket is `git config branch.<branch>.forge-ticket` (an id like `ENG-123`, or the issue URL). It's repository-local and never pushed. You set it from the panel (**Link ticket**), agents set it with `forge-links` (see `skills/forge-links`), `ticket_worktree` sets it, and an Orca Linear link is copied in when the branch has none.
 - **Tern owns the sessions.** Forge remembers which session belongs to which worktree and switches between them.
 - **The panel follows you.** Tern plugins can't pin a sidebar to the window, so Forge keeps one Projects panel per window and moves it into whichever tab you're on.
 - **Everything else is a read.** PR badges, ticket links, agent status and change counts come from `gh`, `linear`, `git` and Tern's own agent state.
@@ -218,7 +232,8 @@ When debugging an overrun, add temporary `tern.log.warn(string.format("PROBE …
 | `worktree-operation.sh` | The helper that runs `wt switch --create` / `wt remove` in a visible terminal, or plain Git's `git worktree add` / `remove` with the setup and archive scripts (from `orca.yaml` or Orca's settings), and writes an atomic completion receipt. |
 | `host.luau`, `input.luau` | The native form block and its text input. |
 | `styles.css`, `icons.css` | Panel styles. `icons.css` is **generated** by `icons/generate-css.py` (plugin stylesheets can't load files, so icons are embedded as data URIs). |
-| `skills/link-ticket/` | The agent skill for linking a worktree's branch to a Linear ticket. |
+| `bin/forge-links` | The command agents use to list, look up and change worktree ↔ ticket ↔ PR links. |
+| `skills/forge-links/` | The agent skill for `forge-links`. |
 | `skills/visual-pr/` | HumanLayer's visual-pr skill, vendored unchanged (MIT). |
 | `usage/window.luau` | Subscription usage UI: the usage status segment, the usage panel, and the palette commands. |
 | `usage/host.luau` | Host half of usage: background polling, which runs even when the panel is closed. |

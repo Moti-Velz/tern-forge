@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""forge-links: Forge's worktree ↔ ticket ↔ PR links, for agents and scripts.
+
+Every Forge project's worktrees, the Linear ticket linked to each worktree's branch, and the
+branch's pull request. Look rows up by whatever key you have:
+
+  - a worktree path (or any path inside one)
+  - a branch name
+  - a ticket id (ENG-123) or Linear URL
+  - a PR number (42, #42) or PR URL
+
+Tickets are stored in Git, `git config branch.<branch>.forge-ticket`, the same place Forge's
+panel reads and writes. Pull requests come from `gh` by branch and are never stored.
+
+  forge-links list [--repo PATH] [--no-prs] [--json]
+  forge-links show KEY [--repo PATH] [--no-prs] [--json]
+  forge-links link KEY TICKET [--repo PATH]
+  forge-links unlink KEY [--repo PATH]
+
+Projects come from Forge's store (`$FORGE_KV`, default
+~/.local/state/tern/plugin-data/forge/kv.json), else the repository you're in.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+
+TICKET_KEY = "forge-ticket"
+TICKET_ID = re.compile(r"\b([A-Z][A-Z0-9]*-\d+)\b")
+PR_URL = re.compile(r"github\.com/([^/]+/[^/]+)/pull/(\d+)")
+DEFAULT_KV = os.path.expanduser("~/.local/state/tern/plugin-data/forge/kv.json")
+
+
+def git(path, *args, check=False):
+    result = subprocess.run(["git", "--no-optional-locks", "-C", path, *args],
+                            capture_output=True, text=True)
+    if check and result.returncode != 0:
+        raise SystemExit(f"git {' '.join(args)}: {result.stderr.strip()}")
+    return result
+
+
+def repo_root(path):
+    """The primary checkout of the repository containing `path`, or None."""
+    common = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if common.returncode != 0:
+        return None
+    common = common.stdout.strip()
+    return os.path.dirname(common) if common.endswith("/.git") else common
+
+
+def projects(repo_arg):
+    """[{name, path, linear}] from --repo, else Forge's store, else the current repository."""
+    if repo_arg:
+        root = repo_root(os.path.abspath(os.path.expanduser(repo_arg)))
+        if not root:
+            raise SystemExit(f"Not a Git repository: {repo_arg}")
+        return [{"name": os.path.basename(root), "path": root, "linear": None}]
+    kv = os.environ.get("FORGE_KV", DEFAULT_KV)
+    try:
+        with open(kv) as f:
+            stored = json.load(f).get("projects") or []
+        found = [{"name": p.get("name") or os.path.basename(p["path"]), "path": p["path"], "linear": p.get("linear")}
+                 for p in stored if isinstance(p, dict) and isinstance(p.get("path"), str) and os.path.isdir(p["path"])]
+        if found:
+            return found
+    except (OSError, ValueError):
+        pass
+    root = repo_root(os.getcwd())
+    if not root:
+        raise SystemExit("No Forge projects found and not inside a Git repository; pass --repo PATH.")
+    return [{"name": os.path.basename(root), "path": root, "linear": None}]
+
+
+def worktrees(project):
+    out = git(project["path"], "worktree", "list", "--porcelain", "-z").stdout
+    trees, tree = [], {}
+    for field in out.split("\0"):
+        if field == "":
+            if tree.get("path") and not tree.get("bare") and not tree.get("prunable"):
+                trees.append(tree)
+            tree = {}
+        elif field.startswith("worktree "):
+            tree = {"path": field[9:]}
+        elif field.startswith("branch refs/heads/"):
+            tree["branch"] = field[len("branch refs/heads/"):]
+        elif field in ("bare", "detached") or field.startswith("prunable"):
+            tree[field.split(" ")[0]] = True
+    for index, t in enumerate(trees):
+        t["primary"] = index == 0
+    return trees
+
+
+def tickets(project):
+    out = git(project["path"], "config", "--get-regexp", rf"^branch\..*\.{TICKET_KEY}$").stdout
+    found = {}
+    for line in out.splitlines():
+        m = re.match(rf"^branch\.(.+)\.{re.escape(TICKET_KEY)} (.+)$", line)
+        if m:
+            found[m.group(1)] = m.group(2)
+    return found
+
+
+def pull_requests(project):
+    """{branch: pr} for the repository's GitHub PRs, newest first per branch; {} without gh."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "list", "--state", "all", "--limit", "200",
+             "--json", "number,headRefName,state,isDraft,url,title"],
+            cwd=project["path"], capture_output=True, text=True, timeout=30,
+            env={**os.environ, "NO_COLOR": "1", "FORCE_COLOR": "0", "CLICOLOR_FORCE": "0"})
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if result.returncode != 0:
+        return {}
+    # Wrappers (mise shims) may print a status line, with color codes, before gh's
+    # JSON; parse from the first line that starts the array.
+    m = re.search(r"^\s*\[", result.stdout, re.MULTILINE)
+    try:
+        rows = json.loads(result.stdout[m.start():]) if m else []
+    except ValueError:
+        return {}
+    # Per branch, as Forge's panel picks: an open PR wins, else the newest (gh lists newest first).
+    best = {}
+    for row in rows:
+        branch = row.get("headRefName")
+        if not branch:
+            continue
+        current = best.get(branch)
+        if current is None or (row.get("state") == "OPEN" and current.get("state") != "OPEN"):
+            best[branch] = row
+    prs = {}
+    for branch, row in best.items():
+        state = {"MERGED": "merged", "CLOSED": "closed"}.get(row.get("state"),
+                                                             "draft" if row.get("isDraft") else "open")
+        prs[branch] = {"number": row.get("number"), "state": state, "url": row.get("url"), "title": row.get("title")}
+    return prs
+
+
+def ticket_fields(link, workspace):
+    if not link:
+        return None
+    m = TICKET_ID.search(link)
+    url = link if link.startswith(("http://", "https://")) else (
+        f"https://linear.app/{workspace}/issue/{link}" if workspace else None)
+    return {"id": m.group(1) if m else link, "link": link, "url": url}
+
+
+def rows(repo_arg, with_prs):
+    projs = projects(repo_arg)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        trees = list(pool.map(worktrees, projs))
+        links = list(pool.map(tickets, projs))
+        prs = list(pool.map(pull_requests, projs)) if with_prs else [{} for _ in projs]
+    out = []
+    for project, ts, ls, ps in zip(projs, trees, links, prs):
+        for t in ts:
+            branch = t.get("branch")
+            out.append({
+                "project": project["name"], "repo": project["path"], "worktree": t["path"],
+                "branch": branch, "primary": t["primary"],
+                "ticket": ticket_fields(ls.get(branch), project.get("linear")) if branch else None,
+                "pr": ps.get(branch) if branch else None,
+            })
+    return out
+
+
+def matches(all_rows, key):
+    """Rows the key names, trying the most specific reading first."""
+    key = key.strip()
+    m = PR_URL.search(key)
+    if m:
+        number = int(m.group(2))
+        return [r for r in all_rows if r["pr"] and r["pr"]["number"] == number
+                and m.group(1).lower() in (r["pr"]["url"] or "").lower()]
+    if re.fullmatch(r"#?\d+", key):
+        number = int(key.lstrip("#"))
+        return [r for r in all_rows if r["pr"] and r["pr"]["number"] == number]
+    path = os.path.abspath(os.path.expanduser(key))
+    if key.startswith(("/", "~", ".")) or os.path.exists(path):
+        path = os.path.realpath(path)
+        hits = [r for r in all_rows if path == os.path.realpath(r["worktree"])
+                or path.startswith(os.path.realpath(r["worktree"]) + os.sep)]
+        # The innermost worktree wins (linked worktrees can sit inside the primary checkout).
+        hits.sort(key=lambda r: len(r["worktree"]), reverse=True)
+        return hits[:1]
+    ticket = TICKET_ID.search(key.upper()) if "linear.app" in key or TICKET_ID.fullmatch(key.upper()) else None
+    if ticket:
+        tid = ticket.group(1)
+        linked = [r for r in all_rows if r["ticket"] and r["ticket"]["id"] == tid]
+        if linked:
+            return linked
+        # Not linked yet: a branch that names it.
+        return [r for r in all_rows if r["branch"] and TICKET_ID.search(r["branch"]) and TICKET_ID.search(r["branch"]).group(1) == tid]
+    return [r for r in all_rows if r["branch"] == key]
+
+
+def one(all_rows, key):
+    hits = matches(all_rows, key)
+    if not hits:
+        raise SystemExit(f"No worktree matches {key!r}. Try `forge-links list`.")
+    if len(hits) > 1:
+        names = ", ".join(f"{r['project']}:{r['branch'] or r['worktree']}" for r in hits)
+        raise SystemExit(f"{key!r} matches several worktrees ({names}); pass --repo or a path.")
+    return hits[0]
+
+
+def show(all_rows, as_json):
+    if as_json:
+        print(json.dumps(all_rows, indent=2))
+        return
+    for r in all_rows:
+        ticket = r["ticket"]["id"] if r["ticket"] else "-"
+        pr = f"#{r['pr']['number']} {r['pr']['state']}" if r["pr"] else "-"
+        name = r["branch"] or "(detached)"
+        if r["primary"]:
+            name += " (primary)"
+        print(f"{r['project']:<20} {name:<44} ticket={ticket:<10} pr={pr:<14} {r['worktree']}")
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="forge-links", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("list", "show", "link", "unlink"):
+        p = sub.add_parser(name)
+        if name != "list":
+            p.add_argument("key", help="worktree path, branch, ticket id/URL, or PR number/URL")
+        if name == "link":
+            p.add_argument("ticket", help="Linear id (ENG-123) or issue URL")
+        p.add_argument("--repo", help="only this repository (path inside it)")
+        if name in ("list", "show"):
+            p.add_argument("--no-prs", action="store_true", help="skip GitHub (faster; PR keys won't resolve)")
+            p.add_argument("--json", action="store_true", help="machine-readable output")
+    args = parser.parse_args()
+
+    if args.command == "list":
+        show(rows(args.repo, not args.no_prs), args.json)
+        return
+    if args.command == "show":
+        hits = matches(rows(args.repo, not args.no_prs), args.key)
+        if not hits:
+            raise SystemExit(f"No worktree matches {args.key!r}. Try `forge-links list`.")
+        show(hits, args.json)
+        return
+
+    # link / unlink: PRs only resolve PR keys, so fetch them only for those.
+    pr_key = bool(PR_URL.search(args.key) or re.fullmatch(r"#?\d+", args.key.strip()))
+    row = one(rows(args.repo, pr_key), args.key)
+    if not row["branch"]:
+        raise SystemExit(f"{row['worktree']} has a detached HEAD: there is no branch to link.")
+    config_key = f"branch.{row['branch']}.{TICKET_KEY}"
+    if args.command == "link":
+        ticket = args.ticket.strip()
+        if not (TICKET_ID.fullmatch(ticket.upper()) or ticket.startswith(("http://", "https://"))):
+            raise SystemExit(f"Expected a Linear id such as ENG-123 or an issue URL, got {ticket!r}.")
+        if not ticket.startswith(("http://", "https://")):
+            ticket = ticket.upper()
+        git(row["repo"], "config", config_key, ticket, check=True)
+        print(f"Linked {row['project']}:{row['branch']} → {ticket}")
+    else:
+        result = git(row["repo"], "config", "--unset", config_key)
+        if result.returncode not in (0, 5):  # 5: nothing was set
+            raise SystemExit(f"git config --unset {config_key}: {result.stderr.strip()}")
+        print(f"Unlinked {row['project']}:{row['branch']}" if result.returncode == 0
+              else f"{row['project']}:{row['branch']} had no ticket")
+
+
+if __name__ == "__main__":
+    main()
