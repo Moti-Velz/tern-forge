@@ -31,7 +31,11 @@ source are listed together, newest first, each tagged with its source. Email thr
 so your replies are included), or messages grouped by subject elsewhere. Its details are every message,
 oldest first, with quoted history removed and attachments listed by name. The mailbox is opened
 read-only, so nothing is marked as read. The server is guessed from your address's domain. For other
-domains, add it after a space: `you@acme.com imap.acme.com` (TLS on 993, or `host:port`).
+domains, add it after a space: `you@acme.com imap.acme.com` (TLS on 993, or `host:port`). Google
+Workspace addresses use `imap.gmail.com`.
+
+Connecting Email again adds another account rather than replacing the first. Threads from every
+account share the Email tab, and each row names its account once there's more than one.
 
 **Local files:** a name starting with a date, such as `2026-10-12 14-00 Acme call.md`, dates the
 meeting, with the time read as local time. The first `# ` heading becomes the title, or else the rest
