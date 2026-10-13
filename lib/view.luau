@@ -118,7 +118,7 @@ local function detail_screen(s: State, note: any, pos: number, total: number, pi
 			if picked then "Remove from the gathered meetings (space)" else "Gather this meeting (space)"),
 		button("attach", "Add to agent", "attach", "Add to the agent (⏎)", "meetings.primary"),
 		button("copy", "Copy", "copy", "Copy as Markdown (c)"),
-		button("web", if note.source == "local" then "Open file" else "Open in " .. (from or "source"), "web",
+		button("web", if note.source == "local" then "Open file" elseif note.source == "email" then "Open in Gmail" else "Open in " .. (from or "source"), "web",
 			"Open where it lives (o)"),
 	}))
 	local body: { Node } = {}
@@ -185,10 +185,10 @@ function View.render(s: State, rows: number): BlockView
 
 	if s.key == "missing" then
 		table.insert(main, ui.node("col", { key = "empty", role = "meetings.empty" }, {
-			text("title", "Connect a meeting source", "meetings.emptyTitle"),
-			text("help", "Granola or Fireflies with an API key (kept in the system keychain), or a folder of "
-				.. "exported notes and transcripts (.md, .txt, .vtt, .srt) from any recorder.", "meetings.muted"),
-			button("setkey", "Connect (K)", "key", "Connect Granola, Fireflies or a local folder", "meetings.primary"),
+			text("title", "Connect a source", "meetings.emptyTitle"),
+			text("help", "Granola or Fireflies with an API key, email over IMAP with an app password (kept in the "
+				.. "system keychain), or a folder of exported notes and transcripts (.md, .txt, .vtt, .srt).", "meetings.muted"),
+			button("setkey", "Connect (K)", "key", "Connect Granola, Fireflies, email or a local folder", "meetings.primary"),
 		}))
 		return { main = ui.col(main) }
 	end

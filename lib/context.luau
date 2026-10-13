@@ -156,7 +156,7 @@ local function nest(md: string, top: number): string
 end
 
 -- Display names of the meeting sources.
-Context.SOURCES = { granola = "Granola", fireflies = "Fireflies", ["local"] = "Local file" }
+Context.SOURCES = { granola = "Granola", fireflies = "Fireflies", ["local"] = "Local file", email = "Email" }
 
 -- One note as a Markdown section headed `## title`.
 function Context.note(note: Note, opts: { transcript: boolean }): string
@@ -193,12 +193,12 @@ function Context.note(note: Note, opts: { transcript: boolean }): string
 	else
 		table.insert(meta, "- Source: " .. from)
 	end
-	table.insert(meta, "- Meeting id: " .. note.id)
+	table.insert(meta, "- Id: " .. note.id)
 	table.insert(out, table.concat(meta, "\n"))
 	local summary = note.summary_markdown or note.summary_text
 	if summary and string.find(summary, "%S") then
 		table.insert(out, "")
-		table.insert(out, "### Summary")
+		table.insert(out, if note.source == "email" then "### Thread" else "### Summary")
 		table.insert(out, "")
 		table.insert(out, nest(summary, 4))
 	end
@@ -242,9 +242,9 @@ function Context.document(notes: { Note }, opts: { transcript: boolean }): strin
 		end
 	end
 	local parts: { string } = {
-		"# Meeting context" .. (if #froms > 0 then " from " .. joined(froms) else ""),
+		"# Context" .. (if #froms > 0 then " from " .. joined(froms) else ""),
 		"",
-		if #sorted == 1 then "1 meeting." else tostring(#sorted) .. " meetings, oldest first.",
+		if #sorted == 1 then "1 item." else tostring(#sorted) .. " items, oldest first.",
 	}
 	for _, n in sorted do
 		table.insert(parts, "")
@@ -270,9 +270,9 @@ Context.INLINE_LIMIT = 6000
 -- blank line so your question follows it.
 function Context.attachment(doc: string, titles: { string }, path: string?): string
 	if path then
-		return "Meeting notes (" .. table.concat(titles, "; ") .. "): read `" .. path .. "`\n\n"
+		return "Context (" .. table.concat(titles, "; ") .. "): read `" .. path .. "`\n\n"
 	end
-	return "<meeting-context>\n\n" .. doc .. "\n</meeting-context>\n\n"
+	return "<context>\n\n" .. doc .. "\n</context>\n\n"
 end
 
 -- Appended when a new agent has to be started with the context as its first prompt.

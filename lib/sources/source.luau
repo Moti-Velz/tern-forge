@@ -24,6 +24,10 @@ export type Def = {
 	secret: string?,
 	-- The prompt's hint.
 	prompt: string,
+	-- A second prompt after the first (its answer is stored after a newline in the same secret).
+	then_prompt: string?,
+	-- What the connect picker says it needs (default "API key").
+	needs: string?,
 	-- One page of meetings, newest first; `cursor` continues.
 	list: (cred: string, cursor: string?, done: Done<Page>) -> (),
 	-- One meeting in full; with `transcript`, also its transcript.

@@ -1,9 +1,9 @@
 # Meetings for Tern
 
-Notes and transcripts from your meetings, in a panel beside the terminal. Supported sources are
-**Granola**, **Fireflies** and **a folder of exported files** from any recorder. Press **Alt+G**, pick
-meetings with the arrow keys and Space, and press Enter to add them to the agent you're working with,
-as the AI synthesis or with full transcripts.
+Notes, transcripts and email threads in a panel beside the terminal. Supported sources are
+**Granola**, **Fireflies**, **email over IMAP** (Gmail, Fastmail, iCloud, Outlook…) and **a folder of
+exported files** from any recorder. Press **Alt+G**, pick items with the arrow keys and Space, and press
+Enter to add them to the agent you're working with, as the AI synthesis or with full transcripts.
 
 ![Meetings panel with a Granola and a Fireflies meeting gathered, next to an omp agent that used both to draft a follow-up email and a deal checklist](docs/screenshot.png)
 
@@ -21,10 +21,17 @@ of these:
 | **Granola** | A personal API key (Business or Enterprise plan): Granola › **Settings › Connectors › API keys** |
 | **Fireflies** | An API key: app.fireflies.ai › **Integrations › Fireflies API**. Free plans get 500 requests a day, which is plenty here |
 | **Local folder** | A folder of exports: Markdown notes (`.md`), plain text (`.txt`) and captions (`.vtt`, `.srt`) |
+| **Email** | Your address and an app password. Gmail: turn on 2-step verification, then create one at myaccount.google.com/apppasswords. Needs `python3` |
 
-API keys go into the system keychain (`plugin.meetings.granola-key`, `plugin.meetings.fireflies-key`). The folder path goes into the plugin's
-settings. Connecting a source again with an empty answer disconnects it. Meetings from every connected
+API keys and the email login go into the system keychain (`plugin.meetings.granola-key`, `plugin.meetings.fireflies-key`, `plugin.meetings.email-account`). The folder path goes into the plugin's
+settings. Connecting a source again with an empty answer disconnects it. Items from every connected
 source are listed together, newest first, each tagged with its source.
+
+**Email:** each item is a thread from the last 45 days: Gmail's own threads (searched across All Mail,
+so your replies are included), or messages grouped by subject elsewhere. Its details are every message,
+oldest first, with quoted history removed and attachments listed by name. The mailbox is opened
+read-only, so nothing is marked as read. The server is guessed from your address's domain. For other
+domains, add it after a space: `you@acme.com imap.acme.com` (TLS on 993, or `host:port`).
 
 **Local files:** a name starting with a date, such as `2026-10-12 14-00 Acme call.md`, dates the
 meeting, with the time read as local time. The first `# ` heading becomes the title, or else the rest
@@ -61,7 +68,7 @@ in, with the meetings as its first message.
 The context is one Markdown document with each meeting, oldest first. Each meeting has its time,
 attendees, source and link, summary and private notes. In Full transcript mode it also has the
 transcript, and so does any meeting that has only a transcript. Up to 6000 characters, the document is
-pasted inline inside `<meeting-context>`. A longer one is written to
+pasted inline inside `<context>`. A longer one is written to
 `<plugin data>/context/<timestamp>-<title>.md`, and only that path is added to the composer.
 
 If something else already uses Alt+G, rebind `plugin.meetings.toggle` in Tern's keybinds.
@@ -99,7 +106,7 @@ and add its display name to `context.SOURCES`.
 | --- | --- |
 | `host.luau` | The `meetings.panel` block: keys, mouse events, selection, gathered meetings, list and details screens, filter |
 | `window.luau` | Service for the block: credentials, source requests, pasting into the agent, focus, Alt+G, Carly exports |
-| `lib/sources/` | `granola`, `fireflies` and `local` sources, and `source.luau`, the contract they share |
+| `lib/sources/` | `granola`, `fireflies`, `local` and `email` sources (`email_imap.py` does the IMAP work), and `source.luau`, the contract they share |
 | `lib/link.luau` | The internal links the block and the window half talk through |
 | `lib/context.luau` | Pure: dates, speaker labels, the Markdown context document and composer attachment |
 | `lib/view.luau` | Pure: the block's view |

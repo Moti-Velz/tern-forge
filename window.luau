@@ -14,6 +14,7 @@ local SOURCES: { source.Def } = {
 	require("./lib/sources/granola"),
 	require("./lib/sources/fireflies"),
 	require("./lib/sources/local"),
+	require("./lib/sources/email"),
 }
 local BY_ID: { [string]: source.Def } = {}
 for _, def in SOURCES do
@@ -156,13 +157,13 @@ local function connect(cx: WindowCx, after: (cx: WindowCx) -> ())
 			table.insert(items, {
 				label = def.name,
 				detail = if on then (if def.credential == "path" then creds[def.id] else "connected")
-					else (if def.credential == "path" then "a folder of exports" else "API key"),
+					else (if def.credential == "path" then "a folder of exports" else (def.needs or "API key")),
 				icon = if def.credential == "path" then "folder" else "key",
 				current = on,
 				source = def.id,
 			})
 		end
-		c:pick({ items = items, placeholder = "Connect a meeting source", icon = "key", action = "connect" }):next(function(item, _err, c2)
+		c:pick({ items = items, placeholder = "Connect a source", icon = "key", action = "connect" }):next(function(item, _err, c2)
 			if item == nil then
 				return
 			end
@@ -171,7 +172,7 @@ local function connect(cx: WindowCx, after: (cx: WindowCx) -> ())
 			local hint = def.prompt .. (if on then " (empty disconnects)" else "")
 			;(c2 :: WindowCx):prompt({
 				value = if def.credential == "path" then creds[def.id] else nil,
-				placeholder = hint, action = if def.credential == "path" then "use folder" else "save key",
+				placeholder = hint, action = if def.credential == "path" then "use folder" elseif def.then_prompt then "next" else "save key",
 				icon = if def.credential == "path" then "folder" else "key",
 			}):next(function(value, _err2, c3)
 				local wcx = c3 :: WindowCx
@@ -180,6 +181,19 @@ local function connect(cx: WindowCx, after: (cx: WindowCx) -> ())
 				end
 				local v = trim(value)
 				if v == "" and not on then
+					return
+				end
+				-- A second field (the email password) follows the first; both are stored as one secret.
+				if v ~= "" and def.then_prompt then
+					wcx:prompt({ placeholder = def.then_prompt, action = "save", icon = "key" }):next(function(second, _e, c5)
+						if second == nil or trim(second) == "" then
+							return
+						end
+						store(c5 :: WindowCx, def, v .. "\n" .. trim(second), function(c4)
+							c4:toast("success", def.name .. " connected")
+							after(c4)
+						end)
+					end)
 					return
 				end
 				store(wcx, def, if v == "" then nil else v, function(c4)
@@ -502,7 +516,7 @@ tern.command({
 
 tern.command({
 	id = "connect",
-	title = "Meetings: Connect a source (Granola, Fireflies, local folder)",
+	title = "Meetings: Connect a source (Granola, Fireflies, email, local folder)",
 	icon = "key",
 	run = function(cx)
 		connect(cx, function(c)
