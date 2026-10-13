@@ -1,21 +1,14 @@
--- Tern-aware Super+arrow focus for Omarchy (tern-omarchy-nav).
+-- Tern-aware window keys for Omarchy (tern-omarchy).
 --
 -- Load from ~/.config/hypr/bindings.lua:
---   dofile(os.getenv("HOME") .. "/src/tern-omarchy-nav/hypr/tern-nav.lua")
+--   dofile(os.getenv("HOME") .. "/src/tern-omarchy/hypr/tern-nav.lua")
 --
--- Super+arrow on a Tern window is handed to Tern, which moves between its panes and bubbles back
--- with `hyprctl dispatch` at its edge. Anywhere else Hyprland moves focus as usual, and when that
--- lands on Tern it tells Tern which way you came in (Super+Ctrl+Shift+arrow), so the pane on that edge
--- gets focus.
+-- On a Tern window these keys are handed to Tern (the chord is injected into it), which acts on
+-- its panes and bubbles back with `hyprctl dispatch` where it has nothing to do: at the edge of
+-- the tab, on the last pane, when no divider can move. Anywhere else they do what Omarchy's
+-- defaults did. Each bind below replaces an Omarchy default, named in its comment.
 
 local TERN_CLASS = "so.stencil.tern"
-
-local KEYS = {
-  { key = "LEFT", dir = "l", name = "left" },
-  { key = "RIGHT", dir = "r", name = "right" },
-  { key = "UP", dir = "u", name = "above" },
-  { key = "DOWN", dir = "d", name = "below" },
-}
 
 local function is_tern(window)
   return window ~= nil and window.class == TERN_CLASS
@@ -30,10 +23,47 @@ local function send(mods, key)
   end, { timeout = 30, type = "oneshot" })
 end
 
-for _, k in ipairs(KEYS) do
-  -- Was: Omarchy's plain "Focus on <name> window" (hl.dsp.focus).
-  hl.unbind("SUPER + " .. k.key)
-  o.bind("SUPER + " .. k.key, "Focus on " .. k.name .. " window or Tern pane", function()
+-- Every bind's function, by its keys, so `hyprctl eval 'tern_nav.press("SUPER + LEFT")'` runs exactly
+-- what the key runs (scripts and tests can't press bound keys: virtual keyboards don't trigger binds).
+tern_nav = { binds = {} }
+function tern_nav.press(keys)
+  local fn = tern_nav.binds[keys]
+  if fn then
+    fn()
+  end
+end
+
+-- Replaces the bind on `keys` with `fn`.
+local function bind(keys, description, fn)
+  hl.unbind(keys)
+  tern_nav.binds[keys] = fn
+  o.bind(keys, description, fn)
+end
+
+-- Binds `keys`: on Tern, inject `mods + key`; elsewhere run `fallback`.
+local function tern_or(keys, description, mods, key, fallback)
+  bind(keys, description, function()
+    if is_tern(hl.get_active_window()) then
+      send(mods, key)
+    else
+      fallback()
+    end
+  end)
+end
+
+-- `swap`: the letter Tern gets for Super+Shift+arrow, as Super+Ctrl+Shift+letter (Tern's own keys
+-- already use Super+Shift+arrows).
+local DIRS = {
+  { key = "LEFT", dir = "l", name = "left", swap = "A" },
+  { key = "RIGHT", dir = "r", name = "right", swap = "D" },
+  { key = "UP", dir = "u", name = "above", swap = "W" },
+  { key = "DOWN", dir = "d", name = "below", swap = "S" },
+}
+
+for _, k in ipairs(DIRS) do
+  -- Was: "Focus on <name> window" (hl.dsp.focus). Moving onto Tern also tells it which way you
+  -- came in (Super+Ctrl+Shift+arrow), so the pane on that edge gets focus.
+  bind("SUPER + " .. k.key, "Focus on " .. k.name .. " window or Tern pane", function()
     local before = hl.get_active_window()
     if is_tern(before) then
       send("SUPER", k.key)
@@ -45,27 +75,48 @@ for _, k in ipairs(KEYS) do
       send("SUPER + CTRL + SHIFT", k.key)
     end
   end)
+
+  -- Was: "Swap window <name>" (hl.dsp.window.swap).
+  tern_or("SUPER + SHIFT + " .. k.key, "Swap window or Tern pane " .. k.name, "SUPER + CTRL + SHIFT", k.swap, function()
+    hl.dispatch(hl.dsp.window.swap({ direction = k.dir }))
+  end)
 end
 
--- Super+W on Tern closes the focused pane (Tern bubbles back to close the window when it is the
--- session's last pane); anywhere else it closes the window as before.
--- Was: Omarchy's "Close window" (hl.dsp.window.close).
-hl.unbind("SUPER + W")
-o.bind("SUPER + W", "Close window or Tern pane", function()
-  if is_tern(hl.get_active_window()) then
-    send("SUPER", "W")
-  else
-    hl.dispatch(hl.dsp.window.close())
-  end
+-- Was: the eight "Expand/Shrink window …" resize binds on minus (code:20) and equal (code:21).
+-- Tern gets them as Super+Ctrl+Shift+letter: H/L width −/+, K/J height −/+, and Y/O, I/U in small
+-- steps.
+local RESIZE = {
+  { keys = "SUPER + code:20", letter = "H", x = -100, y = 0, what = "Narrower" },
+  { keys = "SUPER + code:21", letter = "L", x = 100, y = 0, what = "Wider" },
+  { keys = "SUPER + SHIFT + code:20", letter = "K", x = 0, y = -100, what = "Shorter" },
+  { keys = "SUPER + SHIFT + code:21", letter = "J", x = 0, y = 100, what = "Taller" },
+  { keys = "SUPER + ALT + code:20", letter = "Y", x = -25, y = 0, what = "A little narrower" },
+  { keys = "SUPER + ALT + code:21", letter = "O", x = 25, y = 0, what = "A little wider" },
+  { keys = "SUPER + SHIFT + ALT + code:20", letter = "I", x = 0, y = -25, what = "A little shorter" },
+  { keys = "SUPER + SHIFT + ALT + code:21", letter = "U", x = 0, y = 25, what = "A little taller" },
+}
+for _, r in ipairs(RESIZE) do
+  tern_or(r.keys, r.what .. " window or Tern pane", "SUPER + CTRL + SHIFT", r.letter, function()
+    hl.dispatch(hl.dsp.window.resize({ x = r.x, y = r.y, relative = true }))
+  end)
+end
+
+-- Was: "Close window". On Tern: close the focused pane (the window on its session's last pane).
+tern_or("SUPER + W", "Close window or Tern pane", "SUPER", "W", function()
+  hl.dispatch(hl.dsp.window.close())
 end)
 
--- Super+Shift+A on Tern opens a new agent block beside the focused pane; anywhere else it still
--- opens ChatGPT. Was: Omarchy's "ChatGPT" web app.
-hl.unbind("SUPER + SHIFT + A")
-o.bind("SUPER + SHIFT + A", "New Tern agent, else ChatGPT", function()
-  if is_tern(hl.get_active_window()) then
-    send("SUPER + SHIFT", "A")
-  else
-    hl.dispatch(hl.dsp.exec_cmd(o.launch_webapp("https://chatgpt.com")))
-  end
+-- Was: "Terminal". On Tern: a shell pane beside the focused one, in its directory.
+tern_or("SUPER + RETURN", "Terminal, or new Tern pane", "SUPER", "Return", function()
+  hl.dispatch(hl.dsp.exec_cmd("omarchy-launch-terminal"))
+end)
+
+-- Was: "ChatGPT". On Tern: a new agent block.
+tern_or("SUPER + SHIFT + A", "New Tern agent, else ChatGPT", "SUPER + SHIFT", "A", function()
+  hl.dispatch(hl.dsp.exec_cmd(o.launch_webapp("https://chatgpt.com")))
+end)
+
+-- Was: "Google Photos". On Tern: a new browser block.
+tern_or("SUPER + SHIFT + P", "New Tern browser, else Google Photos", "SUPER + SHIFT", "P", function()
+  hl.dispatch(hl.dsp.exec_cmd(o.launch_webapp_sole("Google Photos", "https://photos.google.com/")))
 end)

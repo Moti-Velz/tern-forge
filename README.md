@@ -1,44 +1,76 @@
-# Omarchy Nav for Tern
+# Tern on Omarchy
 
-One set of keys for Tern panes and Hyprland windows on Omarchy, like vim-tmux-navigator.
-**Super+arrows** move between the panes of the current Tern tab. At the tab's edge the move bubbles
-up to Hyprland and focus goes to the next window. Coming into Tern from another window lands on the
-pane on the edge you came in through.
+Makes Tern feel native on [Omarchy](https://omarchy.org/):
+
+- **One set of window keys.** Omarchy's window keys act on Tern panes first. Where Tern has
+  nothing to do (the edge of a tab, the last pane, no divider to move) they bubble up to Hyprland
+  and act on windows, the way vim-tmux-navigator works with tmux.
+- **Agent notifications.** You get a desktop notification when an agent finishes, fails or waits
+  for your input while you aren't looking at it. Click it to jump to that pane.
+
+## Keys
+
+| Key | On a Tern window | Elsewhere (Omarchy default) |
+| --- | --- | --- |
+| Super+← → ↑ ↓ | Focus the pane in that direction; at the tab's edge, the next window | Focus window |
+| Super+Shift+← → ↑ ↓ | Swap with the pane in that direction; at the edge, swap windows | Swap window |
+| Super+− / Super+= (+Shift for height, +Alt for small steps) | Resize the pane; with no divider on that axis, the window | Resize window |
+| Super+W | Close the pane with Tern's normal close, which asks first if something is running; on the session's last pane, close the Tern window (the session daemon keeps the programs) | Close window |
+| Super+Return | New shell pane in the focused pane's directory, split along its longer side | Terminal |
+| Super+Shift+A | New agent block | ChatGPT |
+| Super+Shift+P | New browser block | Google Photos |
+
+When focus moves onto Tern from another window, Tern focuses the pane on the edge you came in
+through. If you're coming back to the pane you left, it keeps that one.
 
 ## How it works
 
-- **Hyprland** (`hypr/tern-nav.lua`) replaces Omarchy's Super+arrow focus binds with Lua binds. If
-  the active window is Tern (class `so.stencil.tern`), the bind injects Super+arrow into Tern.
-  Otherwise it moves focus as before. If that move lands on Tern, it also injects
-  Super+Ctrl+Shift+arrow, the "entered" chord.
-- **Tern** (`window.luau`) works out the pane rectangles from the tab's split tree (`lib/geometry.luau`).
-  It focuses the neighbour in that direction, or, when there is none, runs
-  `hyprctl dispatch 'hl.dsp.focus({ direction = "l" })'` so Hyprland moves on from Tern. A zoomed
-  tab or a floating pane always bubbles. On the "entered" chord it keeps the focused pane if it is
-  on the near edge, else focuses the edge pane closest to it.
+- **Hyprland** (`hypr/tern-nav.lua`) replaces those Omarchy binds with Lua functions. On a Tern
+  window (class `so.stencil.tern`) they inject a chord into Tern. Elsewhere they run Omarchy's
+  original action.
+  - Most chords are the same keys with Super held.
+  - Where Tern's own preset keys already use a chord, it's Super+Ctrl+Shift+letter: A/D/W/S swap;
+    H/L, K/J and Y/O, I/U resize.
+  - Super+Ctrl+Shift+arrow means "focus just entered Tern".
+- **Tern** (`window.luau`) works out pane rectangles from the tab's split tree (`lib/geometry.luau`).
+  It acts on the pane layout, or calls `hyprctl dispatch` (`lib/hypr.luau`) to do what Hyprland
+  would have done.
+- **Notifications** (`lib/agents.luau`) listen for Tern's `agent_finished` event and check agent
+  states every 3 s for "waiting for input".
+  - They are skipped when the agent's pane is focused and Tern is the active window.
+  - They are sent through `omarchy-notification-send`. Clicking one runs `bin/focus-pane`
+    (`tern focus <pane>`, then focuses the Tern window).
 
 ## Install
 
 ```sh
-tern plugin link ~/src/tern-omarchy-nav
+git clone https://github.com/Moti-Velz/tern-omarchy ~/src/tern-omarchy
+tern plugin link ~/src/tern-omarchy
 ```
 
-Then load the Hyprland side from `~/.config/hypr/bindings.lua`:
+Then load the Hyprland side at the end of `~/.config/hypr/bindings.lua`:
 
 ```lua
-dofile(os.getenv("HOME") .. "/src/tern-omarchy-nav/hypr/tern-nav.lua")
+dofile(os.getenv("HOME") .. "/src/tern-omarchy/hypr/tern-nav.lua")
 ```
 
-Validate it with `hyprctl reload && hyprctl configerrors`. To go back to Omarchy's plain focus
-binds, remove that line.
+Validate it with `hyprctl reload && hyprctl configerrors`. To go back to Omarchy's defaults, remove
+that line.
 
-## Keys
+## Scripting and testing
 
-| Key | Where | Does |
-| --- | --- | --- |
-| Super+← → ↑ ↓ | everywhere | Next Tern pane in that direction, else the next window |
-| Super+W | everywhere | In Tern: close the focused pane with Tern's normal close, which asks first if something is running. On the session's last pane it closes the Tern window instead; the session daemon keeps your programs. Elsewhere: close the window |
-| Super+Shift+A | everywhere | In Tern: new agent block beside the focused pane (Tern's "New agent block"). Elsewhere: ChatGPT, as before |
-| Super+Ctrl+Shift+arrow | Tern only, sent by Hyprland | Internal "focus entered Tern" signal; you don't press it |
+Virtual keyboards (`wtype`) don't trigger Hyprland binds, so every bind's function is also
+reachable by its keys:
 
-Super+Alt+←/→ are taken by Tern's preset keys, so they couldn't be used for the "entered" signal.
+```sh
+hyprctl eval 'tern_nav.press("SUPER + LEFT")'
+```
+
+## Notes
+
+- Tern's preset uses Super+Shift+arrows and Super+Alt(+Shift)+←/→. That's why those actions reach
+  Tern as Super+Ctrl+Shift+letter chords.
+- If the plugin isn't loaded, these keys do nothing while Tern is the active window, because
+  Hyprland has already handed them over.
+- When Tern hands a move back, Hyprland's own rules apply. A focus move past the last window wraps
+  around, just as it does for ordinary windows.

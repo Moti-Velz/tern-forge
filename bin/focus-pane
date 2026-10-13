@@ -1,0 +1,6 @@
+#!/bin/sh
+# Click action of an agent notification: show pane $2 in Tern ($1 is Tern's executable) and bring
+# the Tern window forward.
+set -eu
+"$1" focus "$2"
+hyprctl dispatch "hl.dsp.focus({ window = 'class:so.stencil.tern' })" >/dev/null

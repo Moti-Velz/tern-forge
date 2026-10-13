@@ -1,7 +1,7 @@
 schema = 1
-id = "omarchy-nav"
-name = "Omarchy Nav"
-version = "0.1.0"
-description = "Seamless Super+arrow focus between Tern panes and Hyprland windows on Omarchy, vim-tmux-navigator style: moves inside Tern until the edge, then bubbles up to Hyprland."
+id = "omarchy"
+name = "Omarchy"
+version = "0.2.0"
+description = "Tern on Omarchy: Super+arrows, swap, resize, close, new pane/agent/browser act on Tern panes first and bubble up to Hyprland windows (vim-tmux-navigator style), plus desktop notifications when agents finish or need you."
 icon = "split"
 window = "window.luau"
