@@ -2,6 +2,7 @@
 local wt = require("./worktrunk")
 local view = require("./view")
 local visualize = require("./visualize")
+local usage = require("./usage/window")
 
 local cache = {}
 local inflight = {}
@@ -24,7 +25,7 @@ local watchForms
 local function records(key)
 	local value = tern.kv.get(key)
 	if value == nil then return {} end
-	assert(type(value) == "table", "Overseer storage is invalid: " .. key)
+	assert(type(value) == "table", "Forge storage is invalid: " .. key)
 	return value
 end
 
@@ -204,9 +205,19 @@ local function ticketOf(branch)
 	return branch and string.match(branch, "%f[%w](%u[%u%d]*%-%d+)%f[%W]")
 end
 
--- The worktree's Linear ticket and its link, in the project's workspace or the CLI's.
+-- The worktree's Linear ticket and its link: the one linked to its branch
+-- (git config branch.<branch>.forge-ticket, set from the panel, by agents, or
+-- copied in from Orca), else an id in the branch name. Ids link into the
+-- project's Linear workspace, else the CLI's; URLs link as they are.
 local function ticketFor(project, worktree)
 	local workspace = project.linear or linearDefault
+	local link = worktree.ticket_link
+	if link then
+		local url = if string.match(link, "^https?://") then link
+			elseif workspace then "https://linear.app/" .. workspace .. "/issue/" .. link
+			else nil
+		return { id = string.match(link, "(%u[%u%d]*%-%d+)") or link, url = url }
+	end
 	local id = workspace and not worktree.is_main and ticketOf(worktree.branch)
 	if not id then return nil end
 	return { id = id, url = "https://linear.app/" .. workspace .. "/issue/" .. id }
@@ -236,7 +247,8 @@ local function model(cx)
 		for _, worktree in (entry and entry.worktrees or {}) do
 			local item = table.clone(worktree)
 			item.deleting = removing(worktree.path, jobs)
-			item.displayName = names[project.id] and names[project.id][worktree.path]
+			-- A name given in Forge wins; Orca's name (fixed there by hand) comes next.
+			item.displayName = names[project.id] and names[project.id][worktree.path] or worktree.orca and worktree.orca.name
 			item.pr = not worktree.is_main and worktree.branch and entry.prs and entry.prs[worktree.branch] or nil
 			item.ticket = ticketFor(project, worktree)
 			local session = boundSession(worktree.path, sessions, bindings)
@@ -262,12 +274,12 @@ local function model(cx)
 end
 
 local NAVIGATOR = {
-	title = "Projects", about = "Local repositories, Worktrunk worktrees, and dedicated sessions.",
+	title = "Projects", about = "Local repositories, their worktrees, and dedicated sessions.",
 }
 
--- Overseer also owns PR outline canvases; only navigators show Projects.
+-- Forge also owns PR outline canvases; only navigators show Projects.
 local function isNavigator(canvas)
-	return canvas.owner == "overseer" and canvas.title == NAVIGATOR.title
+	return canvas.owner == "forge" and canvas.title == NAVIGATOR.title
 end
 
 -- The window's one Projects slot: the navigator canvas, or a form shown in its
@@ -278,7 +290,7 @@ local function slot(cx)
 	if slotPane and not cx.session:pane(slotPane) then slotPane = nil end
 	local found = {}
 	for _, pane in cx.session:panes() do
-		if pane.block == "overseer.form" then table.insert(found, pane.pane) end
+		if pane.block == "forge.form" then table.insert(found, pane.pane) end
 	end
 	for _, canvas in cx.canvas:list() do
 		if isNavigator(canvas) and cx.session:pane(canvas.pane) then table.insert(found, canvas.pane) end
@@ -292,7 +304,7 @@ local function slot(cx)
 	end
 	if not slotPane then return nil end
 	local info = cx.session:pane(slotPane)
-	return slotPane, if info and info.block == "overseer.form" then "form" else "canvas"
+	return slotPane, if info and info.block == "forge.form" then "form" else "canvas"
 end
 
 local function draw(cx)
@@ -398,6 +410,8 @@ end
 -- ↻ spins from an explicit refresh until its worktree listings finish, and
 -- for at least one turn so a fast refresh is still visible.
 local SPIN_MIN_MS = 800
+-- Defined with the Orca picker below: adds the repositories registered in Orca.
+local syncOrca
 
 local function refreshByHand(cx)
 	if spinning then return end
@@ -406,6 +420,9 @@ local function refreshByHand(cx)
 	-- An explicit refresh also re-checks pull requests immediately.
 	for _, entry in cache do entry.prAt = nil end
 	if linearDefault == false then linearDefault = nil end
+	-- Orca may have been started or a repository registered there since.
+	for _, project in projects() do wt.forget(project) end
+	syncOrca(cx)
 	refresh(cx, function(doneCx)
 		local function stop(stopCx)
 			spinning = false
@@ -416,11 +433,113 @@ local function refreshByHand(cx)
 	end)
 end
 
+-- ── Worktree links ──────────────────────────────────────────────────────────────
+-- The same store the panel and `forge-links` (bin/) use: each worktree, the ticket
+-- linked to its branch (git config branch.<branch>.forge-ticket) and the branch's PR,
+-- looked up by any key on hand. Used by the Open box and Carly's exports.
+
+local function linkRows()
+	local out = {}
+	for _, project in projects() do
+		local entry = cache[project.id]
+		for _, tree in (entry and entry.worktrees or {}) do
+			local ticket = ticketFor(project, tree)
+			local pr = tree.branch and entry.prs and entry.prs[tree.branch] or nil
+			table.insert(out, {
+				project = project.name, repo = project.path, worktree = tree.path,
+				branch = tree.branch, primary = tree.is_main == true,
+				ticket = ticket and { id = ticket.id, url = ticket.url, link = tree.ticket_link },
+				pr = pr and { number = pr.number, state = pr.state, url = pr.url },
+			})
+		end
+	end
+	return out
+end
+
+-- Rows a key names: a PR URL or number (42, #42), a worktree path (or a path inside
+-- one; the innermost worktree wins), a Linear id or URL (linked first, else a branch
+-- naming it), else a branch name.
+local function matchRows(rows, key)
+	key = key:match("^%s*(.-)%s*$")
+	local found = {}
+	local repoPart, prNumber = string.match(key, "github%.com/([^/]+/[^/]+)/pull/(%d+)")
+	local number = tonumber(prNumber or string.match(key, "^#?(%d+)$"))
+	if number then
+		for _, row in rows do
+			if row.pr and row.pr.number == number
+				and (not repoPart or string.find(string.lower(row.pr.url or ""), string.lower(repoPart), 1, true)) then
+				table.insert(found, row)
+			end
+		end
+		return found
+	end
+	if string.sub(key, 1, 1) == "/" or string.sub(key, 1, 1) == "~" then
+		local path = if string.sub(key, 1, 1) == "~" then (tern.getenv("HOME") or "") .. string.sub(key, 2) else key
+		path = path:gsub("/+$", "")
+		local best
+		for _, row in rows do
+			if (path == row.worktree or string.sub(path, 1, #row.worktree + 1) == row.worktree .. "/")
+				and (not best or #row.worktree > #best.worktree) then
+				best = row
+			end
+		end
+		return if best then { best } else {}
+	end
+	local upper = string.upper(key)
+	local ticket = if string.find(key, "linear.app", 1, true) then string.match(upper, "(%u[%u%d]*%-%d+)")
+		else string.match(upper, "^(%u[%u%d]*%-%d+)$")
+	if ticket then
+		for _, row in rows do
+			if row.ticket and row.ticket.id == ticket and row.ticket.link then table.insert(found, row) end
+		end
+		if #found > 0 then return found end
+		for _, row in rows do
+			if row.branch and ticketOf(row.branch) == ticket then table.insert(found, row) end
+		end
+		return found
+	end
+	for _, row in rows do
+		if row.branch == key then table.insert(found, row) end
+	end
+	return found
+end
+
+-- Export arguments come first, then cx and the call; optional ones may be absent.
+local function exportArgs(...)
+	local args = table.pack(...)
+	return { table.unpack(args, 1, args.n - 2) }, args[args.n - 1], args[args.n]
+end
+
+-- Runs `done` once the cache is at most 15 s old (the panel's own cadence) and
+-- pull requests have settled. The panel refreshes only while it's open, so a
+-- question can arrive with nothing listed yet.
+local function whenFresh(cx, done)
+	local deadline = tern.now() + 10000
+	local function settled(c)
+		for _, entry in cache do
+			if entry.loading or entry.prLoading then
+				if tern.now() < deadline then
+					tern.timer(200, function(next) settled(next or c) end)
+					return
+				end
+				break
+			end
+		end
+		done(c)
+	end
+	-- One turn first: PR listings start right after a worktree listing finishes.
+	local function after(c) tern.timer(50, function(next) settled(next or c) end) end
+	if tern.now() - lastRefresh < 15000 then after(cx) else refresh(cx, function(doneCx) after(doneCx or cx) end) end
+end
+
 -- Tern panes belong to one tab, so the window's one Projects panel follows you:
 -- whenever another tab is shown, it moves there, full height on the left.
-local DEFAULT_SHARE = 0.3
--- The width you leave it at travels with it (a share of the tab).
-local share = tonumber(tern.kv.get("panel-share")) or DEFAULT_SHARE
+-- It is a sidebar: its width is in columns, so it stays narrow on wide screens.
+local DEFAULT_COLUMNS = 40
+-- The width you leave it at travels with it.
+local columns = tonumber(tern.kv.get("panel-columns")) or DEFAULT_COLUMNS
+-- Whether this load has given the panel its width yet (see pin).
+local sized = false
 -- Whether you want the panel shown; it reopens after vanishing with its tab.
 local wantPanel = tern.kv.get("panel-open") == true
 -- The tab the panel was last placed in, to tell a closed panel from a closed tab.
@@ -440,13 +559,27 @@ local function leftShare(cx, tab, pane)
 	return nil
 end
 
+-- The tab's width in columns, measured: Tern only reports split ratios, so nudge
+-- the panel by one column and back, and read how far its ratio moved.
+local function tabColumns(cx, tab, pane)
+	local before = leftShare(cx, tab, pane)
+	if not before or not cx.layout:resize(pane, "right", 1) then return nil end
+	local after = leftShare(cx, tab, pane)
+	cx.layout:resize(pane, "right", -1)
+	if not after or after == before then return nil end
+	return 1 / math.abs(after - before)
+end
+
 -- Tern resizes in cells, and a hidden tab's cells differ from the shown one's,
 -- so steer by the ratio: step, see how far it moved, correct.
-local function sizeTo(cx, tab, pane, want)
+local function sizeTo(cx, tab, pane, wantColumns)
+	local total = tabColumns(cx, tab, pane)
+	if not total then return end
+	local want = math.clamp(wantColumns / total, 0.1, 0.6)
 	local r = leftShare(cx, tab, pane)
-	local step = if r then math.floor((want - r) * 180 + 0.5) else 0
+	local step = if r then math.floor((want - r) * total + 0.5) else 0
 	for _ = 1, 8 do
-		if not r or math.abs(r - want) < 0.005 or step == 0 then return end
+		if not r or math.abs(r - want) < 0.5 / total or step == 0 then return end
 		cx.layout:resize(pane, "right", step)
 		local after = leftShare(cx, tab, pane)
 		if not after or after == r then return end
@@ -463,16 +596,27 @@ local function pin(cx, tab)
 	if not layout then return end
 	local from = cx.session:tab_of(pane)
 	if from == tab and firstLeaf(layout.root) == pane then
+		-- A panel placed before this load (an older, wider one included) gets the
+		-- sidebar width once; after that its width is yours to drag.
+		if not sized then
+			sizeTo(cx, tab, pane, columns)
+			sized = true
+		end
 		panelTab = tab
 		return
 	end
 	local target = firstLeaf(layout.root, pane)
 	if not target then return end
-	if from then
+	if from and sized then
+		-- You dragged it wider or narrower: remember that width, in columns.
 		local current = leftShare(cx, from, pane)
-		if current and math.abs(current - share) > 0.01 then
-			share = math.clamp(current, 0.15, 0.6)
-			tern.kv.set("panel-share", share)
+		local total = current and tabColumns(cx, from, pane)
+		if current and total then
+			local now = math.floor(current * total + 0.5)
+			if math.abs(now - columns) > 1 then
+				columns = math.clamp(now, 20, 120)
+				tern.kv.set("panel-columns", columns)
+			end
 		end
 	end
 	if from ~= tab then
@@ -483,7 +627,8 @@ local function pin(cx, tab)
 		end
 	end
 	cx.layout:move(pane, target, "left", { focus = false })
-	sizeTo(cx, tab, pane, share)
+	sizeTo(cx, tab, pane, columns)
+	sized = true
 	panelTab = tab
 end
 
@@ -780,7 +925,7 @@ local function confirmWorktreeAction(cx, id)
 		local jobs = records("jobs")
 		for _, job in jobs do
 			if job.project == project.id and (job.path == worktree.path or (worktree.branch and job.branch == worktree.branch)) then
-				failed(nextCx, "A Worktrunk operation is already running for this worktree."); return
+				failed(nextCx, "An operation is already running for this worktree."); return
 			end
 		end
 		local jobId = token()
@@ -813,6 +958,29 @@ end
 
 -- Forms take the Projects panel's place, like a page within it, and follow you
 -- the same way; finishing or going back puts the panel back.
+-- What the Open box suggests from as you type: every worktree, with its display
+-- name, ticket and PR, those in `project` first.
+local function openCandidates(project)
+	local names = records("worktree-names")
+	local here, others = {}, {}
+	for _, p in projects() do
+		local entry = cache[p.id]
+		local isHere = project ~= nil and p.id == project.id
+		for _, tree in (entry and entry.worktrees or {}) do
+			local ticket = ticketFor(p, tree)
+			local pr = tree.branch and entry.prs and entry.prs[tree.branch] or nil
+			table.insert(if isHere then here else others, {
+				path = tree.path, project = p.name, here = isHere,
+				branch = tree.branch, primary = tree.is_main == true,
+				name = names[p.id] and names[p.id][tree.path] or tree.orca and tree.orca.name,
+				ticket = ticket and ticket.id, pr = pr and pr.number, prState = pr and pr.state,
+			})
+		end
+	end
+	table.move(others, 1, #others, #here + 1, here)
+	return tern.json.array(here)
+end
+
 local function openForm(cx, mode, project, worktree)
 	if not requireLocal(cx) then return end
 	if worktree and removing(worktree.path) then report(cx, "This worktree is being deleted."); return end
@@ -832,16 +1000,18 @@ local function openForm(cx, mode, project, worktree)
 	end
 	local names = worktree and records("worktree-names")[project.id]
 	local id = token()
+	if mode == "open" then tern.kv.set("form-data:" .. id, openCandidates(project)) end
 	local pane = swapSlot(cx, current, function()
-		return cx:new_block("overseer.form", {
+		return cx:new_block("forge.form", {
 			id, mode,
 			if worktree then worktree.branch or "Detached HEAD" else project and project.name or "",
 			if worktree then names and names[worktree.path] or ""
 				elseif mode == "linear" then project.linear or ""
 				else project and project.base or "",
+			if mode == "open" and project then wt.creation_note(project) else "",
 		}, "beside")
 	end)
-	if not pane then report(cx, "Reload the Overseer plugin.", "Form unavailable"); return end
+	if not pane then report(cx, "Reload the Forge plugin.", "Form unavailable"); return end
 	tern.kv.set("pending-form:" .. tostring(pane), {
 		token = id, mode = mode, project = project and project.id, path = worktree and worktree.path,
 	})
@@ -933,7 +1103,40 @@ local function addPicked(cx, path)
 	end)
 end
 
--- Opens macOS's folder picker; choosing a Git repository adds it right away.
+-- Without a native dialog, a typed path (a leading ~ is the home directory).
+local function promptForFolder(cx)
+	cx:prompt({ value = pickerStart() .. "/", placeholder = "Path to a Git repository", icon = "folder", action = "add" })
+		:next(function(path, _err, nextCx)
+			picking = false
+			if not nextCx or type(path) ~= "string" then return end
+			path = path:match("^%s*(.-)%s*$")
+			if string.sub(path, 1, 1) == "~" then path = (tern.getenv("HOME") or "") .. string.sub(path, 2) end
+			if #path > 1 then path = path:gsub("/+$", "") end
+			if path ~= "" then addPicked(nextCx, path) end
+		end)
+end
+
+-- The system's folder picker: AppleScript on macOS, zenity or kdialog elsewhere.
+local function folderDialog()
+	if tern.runtime.os == "macos" then
+		local argv = { "/usr/bin/osascript" }
+		for _, line in CHOOSE_FOLDER do
+			table.insert(argv, "-e")
+			table.insert(argv, line)
+		end
+		table.insert(argv, pickerStart())
+		return argv
+	end
+	local zenity = wt.find_executable("zenity")
+	if zenity then
+		return { zenity, "--file-selection", "--directory", "--title=Add project", "--filename=" .. pickerStart() .. "/" }
+	end
+	local kdialog = wt.find_executable("kdialog")
+	if kdialog then return { kdialog, "--title", "Add project", "--getexistingdirectory", pickerStart() } end
+	return nil
+end
+
+-- Opens the folder picker; choosing a Git repository adds it right away.
 function pickProject(cx)
 	if not requireLocal(cx) then return end
 	if picking then
@@ -941,26 +1144,101 @@ function pickProject(cx)
 		return
 	end
 	picking = true
-	local argv = { "/usr/bin/osascript" }
-	for _, line in CHOOSE_FOLDER do
-		table.insert(argv, "-e")
-		table.insert(argv, line)
-	end
-	table.insert(argv, pickerStart())
+	local argv = folderDialog()
+	if not argv then promptForFolder(cx); return end
 	-- The picker waits for the user; give up after 30 minutes untouched.
-	tern.process.run(argv, { timeout_ms = 30 * 60 * 1000 }, function(result, nextCx)
+	local ok, startError = pcall(tern.process.run, argv, { timeout_ms = 30 * 60 * 1000 }, function(result, nextCx)
 		picking = false
 		if not nextCx then return end
 		if result.status ~= 0 then
-			-- Cancel (AppleScript error -128), timeouts, and pickers ended by a
-			-- signal (status -1, e.g. a plugin reload) need no message.
-			if result.status == -1 or string.find(result.stderr or "", "-128", 1, true) then return end
+			-- Cancel (AppleScript error -128, zenity and kdialog exit 1), timeouts, and
+			-- pickers ended by a signal (status -1, e.g. a plugin reload) need no message.
+			if result.status == -1 or string.find(result.stderr or "", "-128", 1, true)
+				or (tern.runtime.os ~= "macos" and result.status == 1) then
+				return
+			end
 			report(nextCx, "Couldn't open the folder picker: " .. ((result.stderr or ""):match("^%s*(.-)%s*$")), "Folder picker failed")
 			return
 		end
 		local path = (result.stdout or ""):match("^%s*(.-)%s*$")
 		if #path > 1 then path = path:gsub("/+$", "") end
 		addPicked(nextCx, path)
+	end)
+	if not ok then
+		tern.log.warn("Folder picker unavailable: " .. tostring(startError))
+		promptForFolder(cx)
+	end
+end
+
+-- Repositories registered in Orca that Forge doesn't list yet.
+local function pickOrcaProject(cx)
+	if not requireLocal(cx) then return end
+	wt.orca_repos(function(repos, err, nextCx)
+		if not nextCx then return end
+		if not repos then report(nextCx, err, "Orca projects unavailable"); return end
+		local known = {}
+		for _, project in projects() do known[project.path] = true end
+		local items = {}
+		for _, repo in repos do
+			if not known[repo.path] then
+				table.insert(items, { label = repo.name, detail = repo.path, icon = "folder", path = repo.path })
+			end
+		end
+		if #items == 0 then nextCx:toast("info", "Every Orca project is in Projects"); return end
+		nextCx:pick({ items = items, placeholder = "Add a project from Orca", icon = "folder", action = "add" })
+			:next(function(item, _pickErr, pickedCx)
+				if pickedCx and item then addPicked(pickedCx, item.path) end
+			end)
+	end)
+end
+
+-- Repositories registered in Orca join Projects on their own, when Tern starts and
+-- on ↻; nothing is asked. Projects only grows: one already listed stays as it is.
+local syncingOrca = false
+function syncOrca(cx)
+	if syncingOrca or not wt.orca_available() or not localHost(cx) then return end
+	syncingOrca = true
+	wt.orca_repos(function(repos, err, nextCx)
+		if not repos or not nextCx then
+			syncingOrca = false
+			if err then tern.log.info("Orca projects not synced: " .. tostring(err)) end
+			return
+		end
+		local known = {}
+		for _, project in projects() do known[project.path] = true end
+		local paths = {}
+		for _, repo in repos do
+			if not known[repo.path] then table.insert(paths, repo.path) end
+		end
+		local added = {}
+		local function step(i, stepCx)
+			if i > #paths then
+				syncingOrca = false
+				if #added > 0 then
+					stepCx:toast("info", if #added == 1 then "Project added from Orca" else "Added " .. #added .. " projects from Orca",
+						notificationLabel(table.concat(added, ", ")))
+					refresh(stepCx)
+				end
+				return
+			end
+			wt.inspect(paths[i], function(project, _inspectErr, inspectCx)
+				-- A repository without a checked-out branch has no base to work from; skip it.
+				if project and project.base ~= "" then
+					local all = projects()
+					local listed = false
+					for _, existing in all do
+						if existing.id == project.id or existing.path == project.path then listed = true end
+					end
+					if not listed then
+						table.insert(all, project)
+						tern.kv.set("projects", all)
+						table.insert(added, project.name)
+					end
+				end
+				step(i + 1, inspectCx or stepCx)
+			end)
+		end
+		step(1, nextCx)
 	end)
 end
 
@@ -975,8 +1253,11 @@ local function normalizeName(raw)
 	return if name == "" then nil else name
 end
 
--- Starts Worktrunk's creation of `job.branch` in a background tab and records
+-- Starts the backend's creation of `job.branch` in a background tab and records
 -- `job` for checkJobs. Returns an error message instead when it cannot start.
+-- Creates a worktree in a background tab: a new branch from the base, or, with
+-- `job.checkout`, a branch that already exists (locally, on origin, or PR `job.pr`).
+-- `job.open` opens the worktree's session once it's ready.
 local function launchCreation(cx, project, job)
 	for _, other in records("jobs") do
 		if other.project == project.id and other.branch == job.branch then
@@ -985,13 +1266,18 @@ local function launchCreation(cx, project, job)
 	end
 	local id = token()
 	local receipt = tern.plugin.data .. "/creation-" .. id .. ".status"
-	local ready, command = pcall(wt.creation_command, project, job.branch, receipt)
+	local ready, command
+	if job.checkout then
+		ready, command = pcall(wt.checkout_command, project, job.branch, job.pr, receipt)
+	else
+		ready, command = pcall(wt.creation_command, project, job.branch, receipt)
+	end
 	if not ready then return command end
 	-- A background tab: the panel stays in front while setup runs.
 	local terminal = cx.layout:new_tab({ cwd = project.path, command = command }, { focus = false })
 	if not terminal then return "Could not open the creation terminal." end
 	local tab = cx.session:tab_of(terminal)
-	if tab then cx.layout:name_tab(tab, "Create: " .. job.branch) end
+	if tab then cx.layout:name_tab(tab, (if job.checkout then "Checkout: " else "Create: ") .. job.branch) end
 	job.kind, job.project, job.receipt, job.pane, job.started = "create", project.id, receipt, terminal, os.time()
 	local jobs = records("jobs")
 	jobs[id] = job
@@ -999,20 +1285,99 @@ local function launchCreation(cx, project, job)
 	return nil
 end
 
-local function createWorktree(cx, pane, request, response)
+-- The Open box: a picked worktree opens; typed text is resolved, in order, as a
+-- worktree already there (by path, branch, ticket or PR), a pull request (#42 or
+-- its URL: checked out from GitHub), a ticket (ENG-123 or a Linear URL: branch
+-- feature/ENG-123, linked), or a branch name (checked out if it exists locally or
+-- on origin, else created from the base). New worktrees open once they're ready.
+local function startOpenJob(cx, pane, project, spec)
+	local launchError = launchCreation(cx, project, {
+		branch = spec.branch, displayName = spec.displayName, open = true,
+		checkout = spec.checkout, pr = spec.pr,
+	})
+	if launchError then rejectForm(cx, pane, launchError); return end
+	if spec.ticket then
+		wt.set_ticket(project, spec.branch, spec.ticket, function(ok, err)
+			if not ok then tern.log.warn("Ticket link not saved for " .. spec.branch .. ": " .. tostring(err)) end
+		end)
+	end
+	finishForm(cx, pane)
+	cx:toast("info", if spec.checkout then "Checking out worktree" else "Creating worktree",
+		notificationLabel(spec.displayName or spec.branch))
+	redraw(cx)
+end
+
+local function openExisting(cx, pane, path)
+	finishForm(cx, pane)
+	openWorktree(cx, path)
+end
+
+local function openFromForm(cx, pane, request, response)
+	tern.kv.set("form-data:" .. request.token, nil)
+	if type(response.path) == "string" then openExisting(cx, pane, response.path); return end
 	local project = projectById(request.project)
 	if not project then rejectForm(cx, pane, "Project is no longer registered."); return end
+	local query = (if type(response.query) == "string" then response.query else ""):match("^%s*(.-)%s*$")
+	if query == "" then rejectForm(cx, pane, "Enter a branch, ticket or pull request."); return end
 	local displayName, nameError = normalizeName(response.name)
 	if nameError then rejectForm(cx, pane, nameError); return end
-	wt.validate(project, response.branch, function(ok, err, nextCx)
+
+	local rows = linkRows()
+	-- The worktree the key names in this project. Links (a PR or Linear URL) and
+	-- ticket ids name one thing anywhere; a bare number or branch only here.
+	local global = string.match(query, "^https?://") ~= nil or string.match(string.upper(query), "^%u[%u%d]*%-%d+$") ~= nil
+	local function existing(hits)
+		local here = {}
+		for _, row in hits do
+			if row.repo == project.path then table.insert(here, row) end
+		end
+		if #here == 1 then return here[1] end
+		return if #here == 0 and global and #hits == 1 then hits[1] else nil
+	end
+	local found = existing(matchRows(rows, query))
+	if found then openExisting(cx, pane, found.worktree); return end
+
+	local function onBranch(branch)
+		for _, row in rows do
+			if row.repo == project.path and row.branch == branch then return row end
+		end
+		return nil
+	end
+
+	local prNumber = tonumber(string.match(query, "github%.com/[^/]+/[^/]+/pull/(%d+)") or string.match(query, "^#?(%d+)$"))
+	if prNumber then
+		wt.pull_request_head(project, prNumber, function(pr, err, nextCx)
+			if not nextCx then return end
+			if not pr then rejectForm(nextCx, pane, err); return end
+			local row = onBranch(pr.branch)
+			if row then openExisting(nextCx, pane, row.worktree); return end
+			startOpenJob(nextCx, pane, project, {
+				branch = pr.branch, checkout = true, pr = pr.number,
+				displayName = displayName or pr.title,
+			})
+		end)
+		return
+	end
+
+	local upper = string.upper(query)
+	local ticket = if string.find(query, "linear.app", 1, true) then string.match(upper, "(%u[%u%d]*%-%d+)")
+		else string.match(upper, "^(%u[%u%d]*%-%d+)$")
+	local branch = if ticket then "feature/" .. ticket else query
+	local link = if ticket then (if string.match(query, "^https?://") then query else ticket) else nil
+	local row = onBranch(branch)
+	if row then openExisting(cx, pane, row.worktree); return end
+	wt.branch_location(project, branch, function(where, _err, nextCx)
 		if not nextCx then return end
 		if not nextCx.session:pane(pane) then finishForm(nextCx, pane); return end
-		if not ok then rejectForm(nextCx, pane, err); return end
-		local launchError = launchCreation(nextCx, project, { branch = response.branch, displayName = displayName })
-		if launchError then rejectForm(nextCx, pane, launchError); return end
-		finishForm(nextCx, pane)
-		nextCx:toast("info", "Creating worktree", notificationLabel(displayName or response.branch))
-		redraw(nextCx)
+		if where then
+			startOpenJob(nextCx, pane, project, { branch = branch, checkout = true, displayName = displayName, ticket = link })
+			return
+		end
+		wt.validate(project, branch, function(ok, err, validCx)
+			if not validCx then return end
+			if not ok then rejectForm(validCx, pane, err); return end
+			startOpenJob(validCx, pane, project, { branch = branch, displayName = displayName, ticket = link })
+		end)
 	end)
 end
 
@@ -1080,55 +1445,77 @@ local function changeLinear(cx, pane, request, response)
 	redraw(cx)
 end
 
--- The worktree's path is only known once Worktrunk has created it, so the
--- display name chosen at creation is attached afterwards, by branch.
+-- The new worktree: the one on the job's branch (Git and Worktrunk create
+-- exactly that branch).
+local function createdTree(job, trees)
+	for _, tree in trees do
+		if not tree.is_main and tree.branch == job.branch then
+			return tree
+		end
+	end
+	return nil
+end
+
+-- The worktree's path is only known once the backend has created it, so the
+-- display name chosen at creation is attached afterwards.
 local function applyCreatedName(job)
 	local project = projectById(job.project)
 	if not job.displayName or not project then return end
 	wt.list(project, function(trees, _err, cx)
 		if not trees or not cx then return end
-		for _, tree in trees do
-			if tree.branch == job.branch and not tree.is_main then
-				local names = records("worktree-names")
-				names[project.id] = names[project.id] or {}
-				-- A rename made while setup ran wins over the name typed at creation.
-				if names[project.id][tree.path] == nil then
-					names[project.id][tree.path] = job.displayName
-					tern.kv.set("worktree-names", names)
-					redraw(cx)
-				end
-				return
-			end
+		local tree = createdTree(job, trees)
+		if not tree then return end
+		local names = records("worktree-names")
+		names[project.id] = names[project.id] or {}
+		-- A rename made while setup ran wins over the name typed at creation.
+		if names[project.id][tree.path] == nil then
+			names[project.id][tree.path] = job.displayName
+			tern.kv.set("worktree-names", names)
+			redraw(cx)
 		end
 	end)
 end
 
 -- A worktree created for a ticket gets an omp agent in its session, already
--- asked to read the ticket. Like the display name, its path is found by branch.
+-- asked to read the ticket. Like the display name, its path is found afterwards.
 local function startTicketAgent(job)
 	local project = projectById(job.project)
 	if not job.agentPrompt or not project then return end
 	wt.list(project, function(trees, err, cx)
 		if not cx then return end
 		if not trees then report(cx, err, "Agent not started"); return end
-		for _, tree in trees do
-			if tree.branch == job.branch and not tree.is_main then
-				ensureSession(cx, project, tree.path, tree.branch)
-				local ok, startError = pcall(function()
-					cx.agents:start({ prompt = job.agentPrompt, cwd = tree.path, command = "omp", how = "tab" })
-				end)
-				if not ok then report(cx, startError, "Agent not started") end
-				redraw(cx)
-				return
-			end
+		local tree = createdTree(job, trees)
+		if not tree then
+			report(cx, "No worktree for " .. (job.path or job.branch) .. " after creation.", "Agent not started")
+			return
 		end
-		report(cx, "No worktree for " .. job.branch .. " after creation.", "Agent not started")
+		ensureSession(cx, project, tree.path, tree.branch)
+		local ok, startError = pcall(function()
+			cx.agents:start({ prompt = job.agentPrompt, cwd = tree.path, command = "omp", how = "tab" })
+		end)
+		if not ok then report(cx, startError, "Agent not started") end
+		redraw(cx)
+	end)
+end
+
+-- A worktree made from the Open box opens once it exists (ticket worktrees already
+-- open their session for the agent).
+local function openCreated(job)
+	local project = projectById(job.project)
+	if job.agentPrompt or not project then return end
+	wt.list(project, function(trees, err, cx)
+		if not cx then return end
+		if not trees then report(cx, err, "Worktree not opened"); return end
+		local tree = createdTree(job, trees)
+		if not tree then report(cx, "No worktree for " .. job.branch .. " after creation.", "Worktree not opened"); return end
+		ensureSession(cx, project, tree.path, tree.branch)
+		redraw(cx)
 	end)
 end
 
 local function forms(cx)
 	for _, pane in cx.session:panes() do
-		if pane.block == "overseer.form" and not inflight[pane.pane] then
+		if pane.block == "forge.form" and not inflight[pane.pane] then
 			local request = tern.kv.get("pending-form:" .. tostring(pane.pane))
 			if request then
 				local response = request.response or tern.kv.get("form:" .. request.token)
@@ -1141,8 +1528,8 @@ local function forms(cx)
 					inflight[pane.pane] = true
 					if response.cancelled then
 						finishForm(cx, pane.pane)
-					elseif request.mode == "create" and response.mode == "create" then
-						createWorktree(cx, pane.pane, request, response)
+					elseif request.mode == "open" and response.mode == "open" then
+						openFromForm(cx, pane.pane, request, response)
 					elseif request.mode == "rename" and response.mode == "rename" then
 						renameWorktree(cx, pane.pane, request, response)
 					elseif request.mode == "base" and response.mode == "base" then
@@ -1169,11 +1556,11 @@ watchForms = function()
 		if not cx then watching = false; return end
 		local open = false
 		for _, pane in cx.session:panes() do
-			if pane.block == "overseer.form" then open = true; break end
+			if pane.block == "forge.form" then open = true; break end
 		end
 		if not open then watching = false; return end
 		local ok, err = pcall(forms, cx)
-		if not ok then tern.log.warn("Overseer form check failed: " .. tostring(err)) end
+		if not ok then tern.log.warn("Forge form check failed: " .. tostring(err)) end
 		tern.timer(100, step)
 	end
 	tern.timer(100, step)
@@ -1253,6 +1640,7 @@ local function checkJobs(cx)
 				if status == 0 then
 					cx:toast("info", "Worktree created", notificationLabel(label))
 					startTicketAgent(job)
+					if job.open then openCreated(job) end
 				else
 					cx:toast("error", "Worktree creation failed", "Check the Create tab for details.")
 				end
@@ -1267,9 +1655,14 @@ end
 
 tern.command({ id = "projects", title = "Show or hide Projects", icon = "branch", keys = { "cmd+alt+shift+p" }, run = togglePanel })
 tern.command({ id = "add", title = "Add project", icon = "folder", run = function(cx) pickProject(cx) end })
-tern.command({ id = "create", title = "Create worktree", icon = "branch", run = function(cx)
+tern.command({
+	id = "add-orca", title = "Add project from Orca", icon = "folder",
+	available = function() return wt.orca_available() end,
+	run = function(cx) pickOrcaProject(cx) end,
+})
+tern.command({ id = "create", title = "Open or create worktree (branch, ticket or PR)", icon = "branch", keys = { "cmd+alt+shift+o" }, run = function(cx)
 	local project = activeWorktree(cx)
-	if project then openForm(cx, "create", project) else navigator(cx); cx:toast("info", "Choose a project", "Click + beside a project's name.") end
+	if project then openForm(cx, "open", project) else navigator(cx); cx:toast("info", "Choose a project", "Click + beside a project's name.") end
 end })
 
 local TICKET_PROMPT = "Please read ticket %s to understand your task and ask any questions you have before we start"
@@ -1277,8 +1670,8 @@ local TICKET_PROMPT = "Please read ticket %s to understand your task and ask any
 local function projectNames()
 	local names = {}
 	for _, project in projects() do table.insert(names, project.name) end
-	if #names == 0 then return "No projects are registered in Overseer." end
-	return "Overseer projects: " .. table.concat(names, ", ") .. "."
+	if #names == 0 then return "No projects are registered in Forge." end
+	return "Forge projects: " .. table.concat(names, ", ") .. "."
 end
 
 -- A project named (in any case) or given by path; otherwise the current session's.
@@ -1286,7 +1679,7 @@ local function ticketProject(cx, wanted)
 	if wanted == nil then
 		local project = activeWorktree(cx)
 		if project then return project end
-		return nil, "The current session isn't an Overseer worktree, so name the project. " .. projectNames()
+		return nil, "The current session isn't a Forge worktree, so name the project. " .. projectNames()
 	end
 	if type(wanted) ~= "string" then return nil, "project must be a string." end
 	for _, project in projects() do
@@ -1318,6 +1711,10 @@ tern.carly.export("ticket_worktree", {
 			branch = branch, agentPrompt = string.format(TICKET_PROMPT, ticket),
 		})
 		if launchError then call:fail(launchError); return end
+		-- The branch is linked to its ticket before it exists: git config doesn't mind.
+		wt.set_ticket(project, branch, ticket, function(linked, linkErr)
+			if not linked then tern.log.warn("Ticket link not saved for " .. branch .. ": " .. tostring(linkErr)) end
+		end)
 		nextCx:toast("info", "Creating worktree", notificationLabel(branch))
 		redraw(nextCx)
 		call:reply({
@@ -1328,8 +1725,61 @@ tern.carly.export("ticket_worktree", {
 	return call:wait(30000)
 end)
 
+tern.carly.export("worktrees", {
+	sig = "(key: string?) -> {{project: string, repo: string, worktree: string, branch: string?, primary: boolean, ticket: {id: string, url: string?, link: string?}?, pr: {number: number, state: string, url: string}?}}",
+	doc = "Forge's worktrees with each branch's linked Linear ticket and pull request. key narrows it to the "
+		.. "worktree(s) it names: a worktree path, branch, ticket id or Linear URL, or PR number or URL. Omitted: all.",
+}, function(...)
+	local args, cx, call = exportArgs(...)
+	local key = args[1]
+	whenFresh(cx, function()
+		local rows = linkRows()
+		if type(key) == "string" and key ~= "" then rows = matchRows(rows, key) end
+		call:reply(tern.json.array(rows))
+	end)
+	return call:wait(30000)
+end)
+
+tern.carly.export("link_ticket", {
+	sig = "(key: string, ticket: string?) -> {project: string, branch: string, ticket: string?}",
+	doc = "Links the worktree a key names (path, branch, ticket id/URL, PR number/URL) to a Linear ticket "
+		.. "(ENG-123 or issue URL), stored as git config branch.<branch>.forge-ticket. ticket omitted or empty unlinks.",
+}, function(...)
+	local args, cx, call = exportArgs(...)
+	local key, ticket = args[1], args[2]
+	if type(key) ~= "string" or key == "" then error("Pass a worktree path, branch, ticket or PR.", 0) end
+	local value = if type(ticket) == "string" then ticket:match("^%s*(.-)%s*$") else ""
+	if value ~= "" and not string.match(value, "^https?://") then
+		value = string.upper(value)
+		if not string.match(value, "^%u[%u%d]*%-%d+$") then error("Expected a ticket id such as ENG-123 or an issue URL.", 0) end
+	end
+	whenFresh(cx, function()
+		local hits = matchRows(linkRows(), key)
+		if #hits ~= 1 then
+			call:fail(if #hits == 0 then "No worktree matches " .. key .. "."
+				else key .. " matches " .. #hits .. " worktrees; pass a path or a PR URL.")
+			return
+		end
+		local row = hits[1]
+		if not row.branch then call:fail(row.worktree .. " has a detached HEAD: there is no branch to link."); return end
+		local project
+		for _, p in projects() do
+			if p.path == row.repo then project = p end
+		end
+		if not project then call:fail("Project not found. Refresh Projects."); return end
+		wt.set_ticket(project, row.branch, value, function(ok, err, nextCx)
+			if not ok then call:fail(tostring(err)); return end
+			call:reply({ project = row.project, branch = row.branch, ticket = if value == "" then nil else value })
+			if nextCx then refresh(nextCx) end
+		end)
+	end)
+	return call:wait(30000)
+end)
+
 tern.carly.context(function()
-	return "Overseer creates Linear-ticket worktrees with ticket_worktree. " .. projectNames()
+	return "Forge creates Linear-ticket worktrees with ticket_worktree; worktrees(key) lists worktrees with their "
+		.. "linked ticket and PR (key: path, branch, ticket, or PR), link_ticket(key, ticket) links or unlinks. "
+		.. projectNames()
 end)
 
 tern.on("canvas_action", function(ev, cx)
@@ -1344,7 +1794,7 @@ tern.on("canvas_action", function(ev, cx)
 	elseif ev.act == "collapse" then collapsed[ev.value] = not collapsed[ev.value]; redraw(cx)
 	elseif ev.act == "create" then
 		local project = projectById(ev.value)
-		if project then openForm(cx, "create", project) end
+		if project then openForm(cx, "open", project) end
 	elseif ev.act == "open" then openWorktree(cx, ev.value)
 	elseif ev.act == "Add to Ice Box" or ev.act == "Remove from Ice Box" then
 		-- Menu entries show their action verbatim, so these read as titled.
@@ -1362,6 +1812,23 @@ tern.on("canvas_action", function(ev, cx)
 		local project = projectById(view.projectId(ev.node))
 		if project then openForm(cx, if ev.act == "Change base branch" then "base" else "linear", project)
 		else report(cx, "Project not found. Refresh Projects.") end
+	elseif ev.act == "Link ticket" then
+		local project, worktree = findWorktree(view.worktreePath(ev.node))
+		if not project or not worktree.branch then report(cx, "Worktree not found. Refresh Projects."); return true end
+		cx:prompt({
+			value = worktree.ticket_link or "", icon = "link", action = "link",
+			placeholder = "Linear issue for " .. worktree.branch .. " (ENG-123 or its URL); empty unlinks",
+		}):next(function(value, _err, promptCx)
+			if not promptCx or type(value) ~= "string" then return end
+			local ticket = value:match("^%s*(.-)%s*$")
+			wt.set_ticket(project, worktree.branch, ticket, function(ok, err, setCx)
+				if not setCx then return end
+				if not ok then report(setCx, err, "Ticket not linked"); return end
+				setCx:toast("info", if ticket == "" then "Ticket unlinked" else "Ticket linked",
+					notificationLabel(worktree.branch .. (if ticket == "" then "" else " → " .. ticket)))
+				refresh(setCx)
+			end)
+		end)
 	elseif ev.act == "Visualize PR" then
 		visualizePr(cx, view.worktreePath(ev.node))
 	elseif ev.act == "Rename" then
@@ -1390,8 +1857,23 @@ tern.override("new_tab", function(cx)
 	return true
 end)
 
-tern.chrome.status(function()
-	return { { text = "Projects", icon = "branch", command = "plugin.overseer.projects" } }
+-- Tern keeps one status formatter per plugin: subscription usage first (a click opens its
+-- panel), then the Projects shortcut.
+tern.chrome.status(function(pane)
+	local segments = usage.status(pane) or {}
+	table.insert(segments, { text = "Projects", icon = "branch", tone = "muted", command = "plugin.forge.projects" })
+	return segments
+end)
+
+-- Usage lives in the status bar, which Tern hides by default: turn it on once. Turning it
+-- off afterwards in Preferences sticks.
+tern.timer(0, function(cx)
+	if not cx or tern.kv.get("status-bar-offered") then return end
+	tern.kv.set("status-bar-offered", true)
+	if cx.settings:get("status_bar") ~= true then
+		cx.settings:set("status_bar", true)
+		cx:toast("info", "Status bar on", "Forge shows Claude / GPT usage there. Preferences turns it off.")
+	end
 end)
 
 -- Runs fn in a timer callback of its own, reporting (not raising) errors.
@@ -1432,6 +1914,11 @@ end
 tern.on("window_start", function(cx)
 	refresh(cx)
 	follow(cx)
+	syncOrca(cx)
+end)
+-- A plugin reload in a running window gets no window_start; pick up Orca then too.
+tern.timer(0, function(cx)
+	if cx then syncOrca(cx) end
 end)
 -- Every tab, pane and focus change moves the panel into the shown tab and
 -- draws it; any one of these hooks keeps it following if another is disabled.

@@ -17,15 +17,15 @@ HERE = Path(__file__).resolve().parent
 # (selector, icon, light colour, dark colour).
 ICONS = [
     # Pull request states, in GitHub Primer colours.
-    ("[data-role='overseer.prDraft']", "git-pull-request-draft-16.svg", "#59636e", "#9198a1"),
-    ("[data-role='overseer.prOpen']", "git-pull-request-16.svg", "#1a7f37", "#3fb950"),
-    ("[data-role='overseer.prMerged']", "git-merge-16.svg", "#8250df", "#ab7df8"),
-    ("[data-role='overseer.prClosed']", "git-pull-request-closed-16.svg", "#d1242f", "#f85149"),
+    ("[data-role='forge.prDraft']", "git-pull-request-draft-16.svg", "#59636e", "#9198a1"),
+    ("[data-role='forge.prOpen']", "git-pull-request-16.svg", "#1a7f37", "#3fb950"),
+    ("[data-role='forge.prMerged']", "git-merge-16.svg", "#8250df", "#ab7df8"),
+    ("[data-role='forge.prClosed']", "git-pull-request-closed-16.svg", "#d1242f", "#f85149"),
     # Linear ticket link: Linear's dark mark on light, light mark on dark.
-    ("[data-role='overseer.linear']", "linear.svg", "#222326", "#ffffff"),
+    ("[data-role='forge.linear']", "linear.svg", "#222326", "#ffffff"),
     # Help button beside the Projects heading: muted, accent blue on hover/focus.
-    ("[data-role='overseer.infoButton']", "info-16.svg", "#59636e", "#9198a1"),
-    ("[data-role='overseer.infoButton']:hover,\n[data-role='overseer.infoButton']:focus-visible",
+    ("[data-role='forge.infoButton']", "info-16.svg", "#59636e", "#9198a1"),
+    ("[data-role='forge.infoButton']:hover,\n[data-role='forge.infoButton']:focus-visible",
      "info-16.svg", "#0969da", "#4493f8"),
 ]
 

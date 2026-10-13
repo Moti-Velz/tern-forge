@@ -1,4 +1,9 @@
--- Read-only discovery uses argv subprocesses; creation and removal run in a terminal.
+-- Worktree backends. Read-only discovery uses argv subprocesses; creation and
+-- removal run in a terminal. Forge manages every project's worktrees itself: with
+-- Worktrunk when `wt` is installed, else with plain Git. Orca is only a source:
+-- its registered repositories, their setup scripts, and each worktree's name,
+-- comment, board status and Linear link are read in, never written back.
+-- Listing always reads Git itself.
 local M = {}
 local TIMEOUT_MS = 15000
 
@@ -36,6 +41,16 @@ local function command_error(label, result)
 	return label .. ": " .. detail
 end
 
+-- A CLI's JSON answer, past any line a wrapper printed before it (a mise shim
+-- prints its tool status to stdout, for instance).
+local function decode_output(text)
+	text = text or ""
+	-- JSON starts a line; a wrapper's colored status line has `[` in its escape codes.
+	local start = if string.match(text, "^%s*[%[{]") then 1 else string.find(text, "\n%s*[%[{]")
+	if not start then error("no JSON in the output", 0) end
+	return tern.json.decode(string.sub(text, start))
+end
+
 local function git(path, args, done)
 	local argv = { "git", "--no-optional-locks", "-C", path }
 	for _, arg in ipairs(args) do
@@ -67,9 +82,141 @@ local function find_executable(name)
 	return nil
 end
 
-local function resolve_wt()
-	return find_executable("wt")
-		or error("Worktrunk (wt) was not found. Install it and make wt available on Tern's PATH.", 0)
+-- Orca's CLI. On Linux a bare `orca` is usually the GNOME screen reader, so it
+-- is only trusted on macOS; Orca exports ORCA_CLI_COMMAND where it differs.
+local function orca_cli()
+	local configured = tern.getenv("ORCA_CLI_COMMAND")
+	if configured and configured ~= "" then
+		return if string.sub(configured, 1, 1) == "/" then configured else find_executable(configured)
+	end
+	return find_executable("orca-ide") or (if tern.runtime.os == "macos" then find_executable("orca") else nil)
+end
+
+-- [project.id] = { kind = "worktrunk" | "git", tool = path?, at = ms }.
+-- Rechecked at most once a minute, or on demand through M.forget.
+local backends = {}
+local BACKEND_TTL_MS = 60000
+
+local function plain_backend()
+	local wt = find_executable("wt")
+	return if wt then { kind = "worktrunk", tool = wt } else { kind = "git" }
+end
+
+local function detect(project, done)
+	local cached = backends[project.id]
+	if not cached or tern.now() - cached.at >= BACKEND_TTL_MS then
+		cached = plain_backend()
+		cached.at = tern.now()
+		backends[project.id] = cached
+	end
+	tern.timer(0, function(cx) done(cached, cx) end)
+end
+
+function M.orca_available()
+	return orca_cli() ~= nil
+end
+
+-- Setup and archive scripts from Orca's settings, by repository path, as the
+-- last orca_repos answer gave them. orca.yaml in the checkout takes precedence.
+local orca_hooks = {}
+
+-- Repositories registered in Orca. done({ { name, path } }, err, cx)
+function M.orca_repos(done)
+	local orca = orca_cli()
+	if not orca then
+		deferred_error(done, "Orca's CLI (orca-ide) was not found")
+		return
+	end
+	run({ orca, "repo", "list", "--json" }, function(result, err, cx)
+		if not result then done(nil, err, cx); return end
+		if result.status ~= 0 then done(nil, command_error("Orca did not answer", result), cx); return end
+		local ok, value = pcall(decode_output, result.stdout)
+		local rows = ok and type(value) == "table" and type(value.result) == "table" and value.result.repos
+		if type(rows) ~= "table" then done(nil, "Orca returned an unexpected repository list", cx); return end
+		local repos = {}
+		for _, row in rows do
+			if type(row) == "table" and row.kind == "git" and type(row.path) == "string" then
+				table.insert(repos, { name = if type(row.displayName) == "string" then row.displayName else row.path, path = row.path })
+				local scripts = type(row.hookSettings) == "table" and row.hookSettings.scripts
+				if type(scripts) == "table" then
+					orca_hooks[row.path] = {
+						setup = if type(scripts.setup) == "string" then scripts.setup else "",
+						archive = if type(scripts.archive) == "string" then scripts.archive else "",
+					}
+				end
+			end
+		end
+		done(repos, nil, cx)
+	end)
+end
+
+-- The backend the last listing found; creation and removal use it.
+function M.backend(project)
+	local cached = backends[project.id]
+	return if cached then cached.kind else plain_backend().kind
+end
+
+function M.forget(project)
+	backends[project.id] = nil
+end
+
+-- One script from orca.yaml's `scripts` map: a block scalar (`|`, `|-`) or a
+-- one-line value. Orca runs these with /bin/bash from the worktree root.
+-- Returns "" when the file or script is absent.
+function M.orca_script(root, name)
+	local file = root .. "/orca.yaml"
+	if not tern.fs.exists(file) then return "" end
+	local ok, text = pcall(tern.fs.read, file, 262144)
+	if not ok or type(text) ~= "string" then return "" end
+	local lines = {}
+	for line in string.gmatch(text .. "\n", "(.-)\r?\n") do table.insert(lines, line) end
+	local inScripts, keyIndent = false, nil
+	local index = 1
+	while index <= #lines do
+		local indent, rest = string.match(lines[index], "^( *)(.*)$")
+		local blank = rest == "" or string.sub(rest, 1, 1) == "#"
+		if not blank and #indent == 0 then
+			inScripts = string.match(rest, "^scripts:%s*$") ~= nil or string.match(rest, "^scripts:%s+#") ~= nil
+			keyIndent = nil
+		elseif not blank and inScripts then
+			keyIndent = keyIndent or #indent
+			local key, value = string.match(rest, "^([%w_%-]+):%s*(.-)%s*$")
+			if #indent == keyIndent and key == name then
+				if string.match(value, "^[|>][-+]?%s*$") or string.match(value, "^[|>][-+]?%s+#") then
+					local body, strip = {}, nil
+					index += 1
+					while index <= #lines do
+						local line = lines[index]
+						local lineIndent = #string.match(line, "^( *)")
+						if string.match(line, "^%s*$") then
+							table.insert(body, "")
+						elseif lineIndent > keyIndent then
+							strip = strip or lineIndent
+							table.insert(body, string.sub(line, math.min(strip, lineIndent) + 1))
+						else
+							break
+						end
+						index += 1
+					end
+					while #body > 0 and body[#body] == "" do table.remove(body) end
+					return table.concat(body, "\n")
+				end
+				local quoted = string.match(value, '^"(.*)"$') or string.match(value, "^'(.*)'$")
+				return quoted or (string.gsub(value, "%s+#.*$", ""))
+			end
+		end
+		index += 1
+	end
+	return ""
+end
+
+-- The setup or archive script a plain-Git project runs: orca.yaml's in `root`,
+-- else the one Orca's settings give the repository at `repo`.
+function M.hook_script(repo, root, name)
+	local script = M.orca_script(root, name)
+	if script ~= "" then return script end
+	local hooks = orca_hooks[repo]
+	return hooks and hooks[name] or ""
 end
 
 local function primary_checkout(porcelain)
@@ -235,8 +382,20 @@ local function divergence(value)
 	return { ahead = ahead, behind = behind, name = if type(value.name) == "string" then value.name else nil }
 end
 
+local function sort_trees(trees)
+	table.sort(trees, function(a, b)
+		if a.is_main ~= b.is_main then
+			return a.is_main
+		end
+		local left = a.branch or a.path
+		local right = b.branch or b.path
+		return if left == right then a.path < b.path else left < right
+	end)
+	return trees
+end
+
 local function parse_worktrees(text, project)
-	local value = tern.json.decode(text)
+	local value = decode_output(text)
 	local schema2 = type(value) == "table" and value.schema ~= nil
 	local items = value
 	if schema2 then
@@ -301,23 +460,10 @@ local function parse_worktrees(text, project)
 			error("Worktrunk returned a row without a kind", 0)
 		end
 	end
-	table.sort(trees, function(a, b)
-		if a.is_main ~= b.is_main then
-			return a.is_main
-		end
-		local left = a.branch or a.path
-		local right = b.branch or b.path
-		return if left == right then a.path < b.path else left < right
-	end)
-	return trees
+	return sort_trees(trees)
 end
 
-function M.list(project, done)
-	local ok, wt = pcall(resolve_wt)
-	if not ok then
-		deferred_error(done, tostring(wt))
-		return
-	end
+local function list_worktrunk(wt, project, done)
 	run({ wt, "-C", project.path, "list", "--format=json" }, function(result, err, cx)
 		if not result then
 			done(nil, err, cx)
@@ -330,6 +476,243 @@ function M.list(project, done)
 			else
 				done(nil, "Cannot read Worktrunk JSON: " .. tostring(trees), cx)
 			end
+		end
+	end)
+end
+
+-- `git worktree list --porcelain -z`: one NUL per attribute, an empty field ends a record.
+local function parse_porcelain(text)
+	local entries, current = {}, nil
+	for field in string.gmatch(text, "([^\0]*)\0") do
+		if field == "" then
+			if current then table.insert(entries, current) end
+			current = nil
+		elseif string.sub(field, 1, 9) == "worktree " then
+			current = { path = string.sub(field, 10), detached = false }
+		elseif current then
+			if string.sub(field, 1, 7) == "branch " then
+				current.branch = string.match(field, "^branch refs/heads/(.+)$") or string.sub(field, 8)
+			elseif field == "detached" then
+				current.detached = true
+			elseif field == "bare" then
+				current.bare = true
+			elseif field == "prunable" or string.sub(field, 1, 9) == "prunable " then
+				current.prunable = true
+			end
+		end
+	end
+	if current then table.insert(entries, current) end
+	return entries
+end
+
+-- `git status --porcelain=v2 --branch -z`: change kinds, conflicts and the upstream divergence.
+local function parse_status(text)
+	local changes = { staged = false, modified = false, untracked = false, renamed = false, deleted = false }
+	local conflicts, remote, upstream = false, nil, nil
+	local skip = false
+	for field in string.gmatch(text, "([^\0]*)\0") do
+		if skip then
+			skip = false -- a rename's original path
+		else
+			local kind = string.sub(field, 1, 1)
+			if kind == "#" then
+				upstream = string.match(field, "^# branch%.upstream (.+)$") or upstream
+				local ahead, behind = string.match(field, "^# branch%.ab %+(%d+) %-(%d+)$")
+				if ahead then remote = { ahead = tonumber(ahead), behind = tonumber(behind) } end
+			elseif kind == "1" or kind == "2" then
+				local x, y = string.sub(field, 3, 3), string.sub(field, 4, 4)
+				if x ~= "." then changes.staged = true end
+				if y == "M" or y == "T" then changes.modified = true end
+				if x == "D" or y == "D" then changes.deleted = true end
+				if kind == "2" then
+					changes.renamed = true
+					skip = true
+				end
+			elseif kind == "u" then
+				conflicts = true
+			elseif kind == "?" then
+				changes.untracked = true
+			end
+		end
+	end
+	if remote then remote.name = upstream end
+	return changes, conflicts, remote
+end
+
+-- The same rows Worktrunk's listing gives, read from Git: three reads per worktree.
+local function list_git(project, done)
+	git(project.path, { "worktree", "list", "--porcelain", "-z" }, function(listed, err, cx)
+		if not listed then done(nil, err, cx); return end
+		if listed.status ~= 0 then done(nil, command_error("Cannot list worktrees", listed), cx); return end
+		local trees, pending, finished = {}, 0, false
+		local function settle(nextCx, problem)
+			if finished then return end
+			if problem then
+				finished = true
+				done(nil, problem, nextCx)
+				return
+			end
+			pending -= 1
+			if pending == 0 then
+				finished = true
+				done(sort_trees(trees), nil, nextCx)
+			end
+		end
+		local mainSeen = false
+		for _, entry in parse_porcelain(listed.stdout) do
+			-- A bare entry has no checkout; a prunable one's directory is gone.
+			if not entry.bare and not entry.prunable then
+				local tree = {
+					path = entry.path, branch = if entry.detached then nil else entry.branch,
+					is_main = not mainSeen or entry.path == project.path,
+					dirty = false, conflicts = false,
+					changes = { staged = false, modified = false, untracked = false, renamed = false, deleted = false },
+				}
+				mainSeen = true
+				table.insert(trees, tree)
+				pending += 2
+				git(entry.path, { "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=normal" }, function(result, statusErr, nextCx)
+					if not result then settle(nextCx, statusErr); return end
+					if result.status ~= 0 then
+						settle(nextCx, command_error("Cannot read the status of " .. entry.path, result))
+						return
+					end
+					local changes, conflicts, remote = parse_status(result.stdout)
+					local dirty = conflicts
+					for flag, value in changes do
+						tree.changes[flag] = value
+						dirty = dirty or value
+					end
+					tree.dirty, tree.conflicts, tree.remote = dirty, conflicts, remote
+					settle(nextCx)
+				end)
+				git(entry.path, { "diff", "--shortstat", "HEAD" }, function(result, _diffErr, nextCx)
+					-- Line counts are display details: a failure (no commits yet) leaves them out.
+					if result and result.status == 0 then
+						tree.changes.added_lines = tonumber(string.match(result.stdout, "(%d+) insertion")) or 0
+						tree.changes.deleted_lines = tonumber(string.match(result.stdout, "(%d+) deletion")) or 0
+					end
+					settle(nextCx)
+				end)
+				if tree.branch and project.base ~= "" then
+					pending += 1
+					git(entry.path, { "rev-list", "--left-right", "--count", "refs/heads/" .. project.base .. "...HEAD" }, function(result, _revErr, nextCx)
+						if result and result.status == 0 then
+							local behind, ahead = string.match(result.stdout, "^(%d+)%s+(%d+)")
+							if behind then tree.base = { ahead = tonumber(ahead), behind = tonumber(behind), name = project.base } end
+						end
+						settle(nextCx)
+					end)
+				end
+			end
+		end
+		if pending == 0 then
+			finished = true
+			done(trees, nil, cx)
+		end
+	end)
+end
+
+-- Ticket links Forge keeps, by branch: `git config branch.<branch>.forge-ticket`
+-- (a Linear id such as ENG-123, or an issue URL). Repository-local, never pushed,
+-- and settable by anyone with Git, agents included.
+local TICKET_KEY = "forge-ticket"
+
+local function linear_url(issue, workspace)
+	if type(issue) ~= "string" or issue == "" then return nil end
+	if string.match(issue, "^https://") then return issue end
+	if type(workspace) ~= "string" or workspace == "" then return nil end
+	return "https://linear.app/" .. workspace .. "/issue/" .. issue
+end
+
+-- Orca's own record of each worktree it manages: the name, comment and board
+-- status you gave it there, and its linked Linear issue. Best effort: when Orca
+-- can't answer, the rows simply carry no Orca details.
+local function overlay_orca(orca, project, trees, done)
+	run({ orca, "worktree", "list", "--repo", "path:" .. project.path, "--json" }, function(result, _err, cx)
+		local ok, value = false, nil
+		if result and result.status == 0 then ok, value = pcall(decode_output, result.stdout) end
+		local rows = ok and type(value) == "table" and type(value.result) == "table" and value.result.worktrees
+		if type(rows) == "table" then
+			local byPath = {}
+			for _, row in rows do
+				if type(row) == "table" and type(row.path) == "string" then byPath[row.path] = row end
+			end
+			for _, tree in trees do
+				local row = byPath[tree.path]
+				if row then
+					local linear = if type(row.linkedLinearIssue) == "string" and row.linkedLinearIssue ~= "" then row.linkedLinearIssue else nil
+					-- Orca's link is copied into Forge's own store once; from then on Forge's copy wins.
+					if linear and tree.branch and not tree.ticket_link then
+						local url = linear_url(linear, row.linkedLinearIssueOrganizationUrlKey)
+						tree.ticket_link = url or linear
+						git(project.path, { "config", "branch." .. tree.branch .. "." .. TICKET_KEY, tree.ticket_link }, function() end)
+					end
+					tree.orca = {
+						name = if row.displayNameMode == "fixed" and type(row.displayName) == "string" then row.displayName else nil,
+						comment = if type(row.comment) == "string" and row.comment ~= "" then row.comment else nil,
+						status = if type(row.workspaceStatus) == "string" then row.workspaceStatus else nil,
+					}
+				end
+			end
+		end
+		done(trees, nil, cx)
+	end)
+end
+
+local function read_tickets(project, done)
+	git(project.path, { "config", "--get-regexp", "^branch\\..*\\." .. TICKET_KEY .. "$" }, function(result, _err, cx)
+		local tickets = {}
+		-- Exit 1 means none are set.
+		if result and result.status == 0 then
+			for line in string.gmatch(result.stdout, "[^\n]+") do
+				-- `-` is a pattern quantifier, so the key is matched escaped.
+				local branch, value = string.match(line, "^branch%.(.+)%.forge%-ticket (.+)$")
+				if branch and value then tickets[branch] = value end
+			end
+		end
+		done(tickets, cx)
+	end)
+end
+
+-- Links `branch` to `ticket` (nil or "" clears it). done(ok, err, cx)
+function M.set_ticket(project, branch, ticket, done)
+	if type(branch) ~= "string" or branch == "" then
+		deferred_error(done, "This worktree has no branch to link.")
+		return
+	end
+	local key = "branch." .. branch .. "." .. TICKET_KEY
+	local args = if ticket and ticket ~= "" then { "config", key, ticket } else { "config", "--unset", key }
+	git(project.path, args, function(result, err, cx)
+		-- --unset exits 5 when nothing was set: already clear.
+		if result and (result.status == 0 or (result.status == 5 and not (ticket and ticket ~= ""))) then
+			done(true, nil, cx)
+		else
+			done(false, err or command_error("Cannot save the ticket link", result), cx)
+		end
+	end)
+end
+
+function M.list(project, done)
+	detect(project, function(backend, _cx)
+		local function finish(trees, err, cx)
+			if not trees then done(trees, err, cx); return end
+			read_tickets(project, function(tickets, ticketCx)
+				for _, tree in trees do
+					tree.ticket_link = tree.branch and tickets[tree.branch] or nil
+				end
+				local orca = orca_cli()
+				if orca then
+					overlay_orca(orca, project, trees, done)
+				else
+					done(trees, nil, ticketCx)
+				end
+			end)
+		end
+		if backend.kind == "worktrunk" then
+			list_worktrunk(backend.tool, project, finish)
+		else
+			list_git(project, finish)
 		end
 	end)
 end
@@ -413,36 +796,104 @@ local function octal_bytes(value)
 	end))
 end
 
-local function operation_command(mode, project, target, option, receipt)
+-- A sentence for the New worktree form about what happens besides `git worktree add`.
+function M.creation_note(project)
+	local kind = M.backend(project)
+	if kind == "worktrunk" then return "Worktrunk hooks will run." end
+	if M.orca_script(project.path, "setup") ~= "" then return "The orca.yaml setup script will run." end
+	if M.hook_script(project.path, project.path, "setup") ~= "" then return "Orca's setup script for this repository will run." end
+	return ""
+end
+
+-- The helper's argv as one shell command line for a terminal tab.
+local function operation_command(mode, project, target, option, receipt, hook)
 	if type(receipt) ~= "string" or string.sub(receipt, 1, 1) ~= "/" then
 		error("The operation receipt must have an absolute path", 0)
 	end
-	local args = { tern.plugin.dir .. "/worktree-operation.sh", mode, resolve_wt(), project.path, target, option, receipt }
+	local backend = backends[project.id] or plain_backend()
+	local args = {
+		tern.plugin.dir .. "/worktree-operation.sh", mode, backend.kind, backend.tool or "",
+		project.path, target, option, receipt, hook or "",
+	}
 	local program = {}
 	-- macOS Bash 3.2's printf -v can reuse the previous value for an empty
 	-- %b result. A prefix makes every assignment nonempty; strip it afterward.
+	local quoted = {}
 	for index, value in ipairs(args) do
 		local variable = "a" .. tostring(index)
 		table.insert(program, 'printf -v ' .. variable .. ' "_%b" "' .. octal_bytes(value) .. '"; '
 			.. variable .. '=${' .. variable .. '#_}; ')
+		table.insert(quoted, '"$' .. variable .. '"')
 	end
-	table.insert(program, 'exec /bin/bash "$a1" "$a2" "$a3" "$a4" "$a5" "$a6" "$a7"')
+	table.insert(program, "exec /bin/bash " .. table.concat(quoted, " "))
 	-- A single-quoted ASCII payload, with no apostrophes, is literal in sh/zsh,
 	-- fish and Nushell. All decoding happens in Bash, not the user's login shell.
 	return "/bin/bash -c '" .. table.concat(program) .. "'"
 end
 
+-- Git creates the worktree beside the primary checkout, as Worktrunk's default
+-- template does, and runs the setup script there (orca.yaml's, else Orca's
+-- settings'); Worktrunk uses its own layout and hooks.
 function M.creation_command(project, branch, receipt)
 	local invalid = branch_error(branch)
 	if invalid then error(invalid, 0) end
-	return operation_command("create", project, branch, project.base, receipt)
+	local backend = backends[project.id] or plain_backend()
+	local hook = if backend.kind == "git" then M.hook_script(project.path, project.path, "setup") else ""
+	return operation_command("create", project, branch, project.base, receipt, hook)
+end
+
+-- A worktree for a branch that already exists: local, on origin, or a PR's head
+-- (`pr` is its number, fetched as refs/pull/<n>/head when the branch is missing).
+function M.checkout_command(project, branch, pr, receipt)
+	local invalid = branch_error(branch)
+	if invalid then error(invalid, 0) end
+	local backend = backends[project.id] or plain_backend()
+	local hook = if backend.kind == "git" then M.hook_script(project.path, project.path, "setup") else ""
+	return operation_command("checkout", project, branch, if pr then tostring(pr) else "", receipt, hook)
+end
+
+-- Where `branch` exists: "local", "remote" (on origin), or nil. Checks origin over the
+-- network (`git ls-remote`) only when there's no local or remote-tracking ref.
+function M.branch_location(project, branch, done)
+	git(project.path, { "show-ref", "--verify", "--quiet", "refs/heads/" .. branch }, function(localRef, err, cx)
+		if not localRef then done(nil, err, cx); return end
+		if localRef.status == 0 then done("local", nil, cx); return end
+		git(project.path, { "show-ref", "--verify", "--quiet", "refs/remotes/origin/" .. branch }, function(tracking, _err, tcx)
+			if tracking and tracking.status == 0 then done("remote", nil, tcx); return end
+			git(project.path, { "ls-remote", "--exit-code", "--heads", "origin", branch }, function(remote, _rerr, rcx)
+				done(if remote and remote.status == 0 then "remote" else nil, nil, rcx)
+			end)
+		end)
+	end)
+end
+
+-- One pull request of the project's GitHub repository by number: its head branch
+-- and title. done({ number, branch, title, url, state }, err, cx)
+function M.pull_request_head(project, number, done)
+	local gh = find_executable("gh")
+	if not gh then
+		deferred_error(done, "GitHub CLI (gh) was not found")
+		return
+	end
+	run({ gh, "pr", "view", tostring(number), "--json", "number,headRefName,title,url,state" }, function(result, err, cx)
+		if not result then done(nil, err, cx); return end
+		if result.status ~= 0 then done(nil, command_error("Pull request #" .. tostring(number) .. " not found", result), cx); return end
+		local ok, value = pcall(decode_output, result.stdout)
+		if not ok or type(value) ~= "table" or type(value.headRefName) ~= "string" then
+			done(nil, "GitHub returned an unexpected response", cx)
+			return
+		end
+		done({ number = value.number, branch = value.headRefName, title = value.title, url = value.url, state = value.state }, nil, cx)
+	end, project.path)
 end
 
 function M.removal_command(project, worktree, receipt)
 	if worktree.is_main or worktree.path == project.path then
 		error("The primary checkout cannot be deleted.", 0)
 	end
-	return operation_command("remove", project, worktree.path, worktree.branch or "", receipt)
+	local backend = backends[project.id] or plain_backend()
+	local hook = if backend.kind == "git" then M.hook_script(project.path, worktree.path, "archive") else ""
+	return operation_command("remove", project, worktree.path, worktree.branch or "", receipt, hook)
 end
 
 -- "git@github.com:owner/repo.git", "https://github.com/owner/repo", "ssh://git@github.com/owner/repo.git"
@@ -506,7 +957,7 @@ function M.pull_requests(project, branches, done)
 		run(argv, function(result, run_err, next_cx)
 			if not result then done(nil, run_err, next_cx); return end
 			if result.status ~= 0 then done(nil, command_error("GitHub lookup failed", result), next_cx); return end
-			local ok, value = pcall(tern.json.decode, result.stdout)
+			local ok, value = pcall(decode_output, result.stdout)
 			if not ok or type(value) ~= "table" or type(value.data) ~= "table" then
 				done(nil, "GitHub returned an unexpected response", next_cx)
 				return
@@ -541,7 +992,7 @@ function M.pull_request_meta(project, number, done)
 		run({ gh, "pr", "view", tostring(number), "--repo", repo, "--json", SNAPSHOT_FIELDS }, function(result, run_err, next_cx)
 			if not result then done(nil, run_err, next_cx); return end
 			if result.status ~= 0 then done(nil, command_error("GitHub lookup failed", result), next_cx); return end
-			local ok, meta = pcall(tern.json.decode, result.stdout)
+			local ok, meta = pcall(decode_output, result.stdout)
 			if not ok or type(meta) ~= "table" or type(meta.title) ~= "string" then
 				done(nil, "GitHub returned an unexpected response", next_cx)
 				return

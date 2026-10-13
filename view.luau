@@ -32,16 +32,16 @@ end
 
 local function button(key, label, action, title, role)
 	return ui.el("button", {
-		key = key, text = label, role = role or "overseer.button",
+		key = key, text = label, role = role or "forge.button",
 		title = title, actions = { click = action },
 	})
 end
 
 local PR_STATES = {
-	draft = { role = "overseer.prDraft", label = "Draft" },
-	open = { role = "overseer.prOpen", label = "Open" },
-	merged = { role = "overseer.prMerged", label = "Merged" },
-	closed = { role = "overseer.prClosed", label = "Closed" },
+	draft = { role = "forge.prDraft", label = "Draft" },
+	open = { role = "forge.prOpen", label = "Open" },
+	merged = { role = "forge.prMerged", label = "Merged" },
+	closed = { role = "forge.prClosed", label = "Closed" },
 }
 
 local function dot(key, role)
@@ -91,6 +91,9 @@ local function details(worktree, branch)
 	end
 	local pr = worktree.pr and PR_STATES[worktree.pr.state]
 	if pr then table.insert(lines, "PR #" .. tostring(worktree.pr.number) .. " · " .. pr.label) end
+	local orca = worktree.orca
+	if orca and orca.status then table.insert(lines, "Orca: " .. string.gsub(orca.status, "-", " ")) end
+	if orca and orca.comment then table.insert(lines, "“" .. orca.comment .. "”") end
 	if worktree.session then
 		local tabs = #(worktree.tabs or {})
 		local agent = if worktree.agent == "waiting" then " · agent waiting for you"
@@ -112,6 +115,7 @@ local function worktreeNode(worktree, activePath)
 	if not worktree.deleting then
 		-- Menu entries show their action string verbatim, so actions are titled.
 		if worktree.pr then table.insert(menu, "Visualize PR") end
+		if worktree.branch then table.insert(menu, "Link ticket") end
 		table.insert(menu, "Rename")
 		if not worktree.is_main then
 			table.insert(menu, if worktree.iced then "Remove from Ice Box" else "Add to Ice Box")
@@ -121,46 +125,46 @@ local function worktreeNode(worktree, activePath)
 	end
 	local status
 	if worktree.iced then
-		status = text("status", "🧊", "overseer.iceMark", { title = "In the Ice Box" })
+		status = text("status", "🧊", "forge.iceMark", { title = "In the Ice Box" })
 	else
-		local role, title = "overseer.dotIdle", "No session"
+		local role, title = "forge.dotIdle", "No session"
 		if worktree.deleting then
-			role, title = "overseer.dotBusy", "Deleting"
+			role, title = "forge.dotBusy", "Deleting"
 		elseif worktree.agent == "waiting" then
-			role, title = "overseer.dotWaiting", "Agent waiting for you"
+			role, title = "forge.dotWaiting", "Agent waiting for you"
 		elseif worktree.agent == "working" then
-			role, title = "overseer.dotAgent", "Agent working"
+			role, title = "forge.dotAgent", "Agent working"
 		elseif worktree.session then
-			role, title = "overseer.dotOpen", "Session open"
+			role, title = "forge.dotOpen", "Session open"
 		end
 		status = ui.el("div", { key = "status", role = role, title = title })
 	end
 	local head = {
 		status,
-		text("branch", label, "overseer.branch"),
+		text("branch", label, "forge.branch"),
 	}
 	-- The conflicts badge already says the worktree has unfinished changes.
 	if worktree.dirty and not worktree.conflicts then
-		table.insert(head, text("dirty", "✱", "overseer.dirtyMark", { title = "Uncommitted changes" }))
+		table.insert(head, text("dirty", "✱", "forge.dirtyMark", { title = "Uncommitted changes" }))
 	end
 	if worktree.is_main then
-		table.insert(head, text("primary", "Primary", "overseer.badge"))
+		table.insert(head, text("primary", "Primary", "forge.badge"))
 	end
 	-- Pushes the remaining badges to the row's right edge.
 	table.insert(head, ui.el("div", { key = "spacer", grow = 1 }))
 	if worktree.conflicts then
-		table.insert(head, text("conflicts", "conflicts", "overseer.badgeBad"))
+		table.insert(head, text("conflicts", "conflicts", "forge.badgeBad"))
 	end
 	if worktree.deleting then
-		table.insert(head, text("deleting", "deleting", "overseer.badgeWarn"))
+		table.insert(head, text("deleting", "deleting", "forge.badgeWarn"))
 	elseif not worktree.session then
-		table.insert(head, text("open", "Open", "overseer.openHint"))
+		table.insert(head, text("open", "Open", "forge.openHint"))
 	end
 	-- The Linear ticket and pull request sit together, ticket first.
 	local links = {}
 	if worktree.ticket then
 		table.insert(links, ui.el("button", {
-			key = "linear", role = "overseer.linear", title = worktree.ticket.id .. " — open in Linear",
+			key = "linear", role = "forge.linear", title = worktree.ticket.id .. " — open in Linear",
 			href = worktree.ticket.url, aria = "Linear ticket " .. worktree.ticket.id, actions = { click = "open" },
 		}))
 	end
@@ -173,7 +177,7 @@ local function worktreeNode(worktree, activePath)
 		}))
 	end
 	if #links > 0 then
-		table.insert(head, ui.node("row", { key = "links", role = "overseer.links" }, links))
+		table.insert(head, ui.node("row", { key = "links", role = "forge.links" }, links))
 	end
 	-- A renamed row keeps its branch visible; otherwise the directory helps
 	-- tell apart worktrees whose branch names share a long ticket prefix.
@@ -181,7 +185,7 @@ local function worktreeNode(worktree, activePath)
 		elseif worktree.is_main then "primary checkout · " .. basename(worktree.path)
 		else basename(worktree.path)
 	local summary = ui.node("col", {
-		key = "row", role = "overseer.worktreeRow", title = details(worktree, branch),
+		key = "row", role = "forge.worktreeRow", title = details(worktree, branch),
 		aria = label .. (if worktree.agent == "waiting" then ", agent waiting for you"
 				elseif worktree.agent == "working" then ", agent working"
 				elseif worktree.session then ", session open"
@@ -190,62 +194,62 @@ local function worktreeNode(worktree, activePath)
 			.. (if worktree.iced then ", in the Ice Box" else ""),
 		actions = { click = if worktree.deleting then nil else "open=" .. worktree.path, menu = menu },
 	}, {
-		ui.node("row", { key = "head", role = "overseer.worktreeHead" }, head),
-		text("subtitle", subtitle, "overseer.worktreeSubtitle"),
+		ui.node("row", { key = "head", role = "forge.worktreeHead" }, head),
+		text("subtitle", subtitle, "forge.worktreeSubtitle"),
 	})
 	local children = { summary }
 	for _, tab in ipairs(worktree.tabs or {}) do
 		local tabChildren = {
-			dot("dot", if tab.agent == "waiting" then "overseer.dotTabWaiting"
-				elseif tab.agent == "working" then "overseer.dotTabAgent"
-				elseif tab.busy then "overseer.dotBusy"
-				else "overseer.dotTab"),
-			text("name", tab.name, "overseer.tabName", { grow = 1 }),
+			dot("dot", if tab.agent == "waiting" then "forge.dotTabWaiting"
+				elseif tab.agent == "working" then "forge.dotTabAgent"
+				elseif tab.busy then "forge.dotBusy"
+				else "forge.dotTab"),
+			text("name", tab.name, "forge.tabName", { grow = 1 }),
 		}
 		-- The pulsing dot already says an agent is working; waiting needs you, so it is spelled out.
 		if tab.agent == "waiting" then
-			table.insert(tabChildren, text("state", "waiting", "overseer.waiting"))
+			table.insert(tabChildren, text("state", "waiting", "forge.waiting"))
 		elseif not tab.agent and tab.busy then
-			table.insert(tabChildren, text("busy", "running", "overseer.busy"))
+			table.insert(tabChildren, text("busy", "running", "forge.busy"))
 		end
 		if not tab.pane then
-			table.insert(tabChildren, text("unavailable", "no pane", "overseer.marker"))
+			table.insert(tabChildren, text("unavailable", "no pane", "forge.marker"))
 		end
 		table.insert(children, ui.node("row", {
-			key = "tab" .. tostring(tab.id), role = "overseer.tabRow",
+			key = "tab" .. tostring(tab.id), role = "forge.tabRow",
 			title = if tab.pane then "Focus " .. tab.name else "This tab has no focusable pane",
 			actions = if tab.pane then { click = "tab=" .. tostring(tab.pane) } else nil,
 		}, tabChildren))
 	end
 	return ui.node("col", {
-		key = "w" .. safeKey(worktree.path), role = "overseer.worktree",
+		key = "w" .. safeKey(worktree.path), role = "forge.worktree",
 		mark = if active then "pick" else nil,
 	}, children)
 end
 
 function View.render(model)
 	local children = {
-		ui.node("row", { key = "header", role = "overseer.header" }, {
-			ui.node("row", { key = "titleGroup", role = "overseer.titleGroup", grow = 1 }, {
-				text("title", "Projects", "overseer.heading"),
+		ui.node("row", { key = "header", role = "forge.header" }, {
+			ui.node("row", { key = "titleGroup", role = "forge.titleGroup", grow = 1 }, {
+				text("title", "Projects", "forge.heading"),
 				ui.el("button", {
-					key = "help", role = "overseer.infoButton",
+					key = "help", role = "forge.infoButton",
 					title = "How Projects works", aria = "How Projects works",
 					actions = { click = "help" },
 				}),
 			}),
-			button("add", "+", "add", "Add an existing Git repository", "overseer.iconButton"),
+			button("add", "+", "add", "Add an existing Git repository", "forge.iconButton"),
 			-- The glyph is its own element so only the arrow turns, not the button's frame.
 			ui.el("button", {
-				key = "refresh", role = "overseer.iconButton", actions = { click = "refresh" },
+				key = "refresh", role = "forge.iconButton", actions = { click = "refresh" },
 				title = if model.refreshing then "Refreshing…" else "Refresh worktrees and sessions",
 				aria = if model.refreshing then "Refreshing" else "Refresh worktrees and sessions",
 			}, {
-				text("glyph", "↻", if model.refreshing then "overseer.refreshGlyphSpin" else "overseer.refreshGlyph"),
+				text("glyph", "↻", if model.refreshing then "forge.refreshGlyphSpin" else "forge.refreshGlyph"),
 			}),
 			button("icebox", "🧊", "toggle-icebox",
 				if model.showIcebox then "Hide Ice Box worktrees" else "Show Ice Box worktrees",
-				if model.showIcebox then "overseer.iconButtonOn" else "overseer.iconButton"),
+				if model.showIcebox then "forge.iconButtonOn" else "forge.iconButton"),
 		}),
 	}
 	if model.confirmation then
@@ -256,23 +260,23 @@ function View.render(model)
 		}
 		if not request.checking then
 			table.insert(buttons, button("confirm", if deleting then "Delete worktree" else "Close session",
-				"confirm=" .. request.id, "Confirm " .. request.label, "overseer.dangerButton"))
+				"confirm=" .. request.id, "Confirm " .. request.label, "forge.dangerButton"))
 		end
-		table.insert(children, ui.node("col", { key = "confirmation", role = "overseer.confirmation" }, {
-			text("title", if deleting then "Delete worktree?" else "Close session?", "overseer.formHeading"),
-			text("name", request.label, "overseer.branch"),
-			text("path", request.path, "overseer.hint"),
+		table.insert(children, ui.node("col", { key = "confirmation", role = "forge.confirmation" }, {
+			text("title", if deleting then "Delete worktree?" else "Close session?", "forge.formHeading"),
+			text("name", request.label, "forge.branch"),
+			text("path", request.path, "forge.hint"),
 			text("detail", if deleting
 				then "Removes this directory, including ignored files. Keeps Git branches. Its session closes after successful removal. Stop file-writing tasks first."
-				else "Stops all running programs and closes this session's tabs. Keeps the worktree files and Git branches.", "overseer.hint"),
-			text("status", if request.checking then "Checking worktree..." else "", "overseer.hint"),
-			ui.node("row", { key = "buttons", role = "overseer.formButtons" }, buttons),
+				else "Stops all running programs and closes this session's tabs. Keeps the worktree files and Git branches.", "forge.hint"),
+			text("status", if request.checking then "Checking worktree..." else "", "forge.hint"),
+			ui.node("row", { key = "buttons", role = "forge.formButtons" }, buttons),
 		}))
 	end
 	if #model.projects == 0 then
-		table.insert(children, ui.node("col", { key = "empty", role = "overseer.empty" }, {
-			text("title", "Your repositories, in one place.", "overseer.emptyTitle"),
-			text("help", "Add a project to see every worktree and its Tern tabs. Existing worktrees stay as they are.", "overseer.hint"),
+		table.insert(children, ui.node("col", { key = "empty", role = "forge.empty" }, {
+			text("title", "Your repositories, in one place.", "forge.emptyTitle"),
+			text("help", "Add a project to see every worktree and its Tern tabs. Existing worktrees stay as they are.", "forge.hint"),
 			button("add", "Add your first project", "add", "Choose a Git repository"),
 		}))
 	end
@@ -280,23 +284,23 @@ function View.render(model)
 		local collapsed = model.collapsed and model.collapsed[project.id]
 		local projectChildren = {
 			ui.node("row", {
-				key = "header", role = "overseer.projectHeader",
+				key = "header", role = "forge.projectHeader",
 				actions = { menu = { "Change base branch", "Set Linear workspace" } },
 			}, {
 				button("collapse", (if collapsed then "▸  " else "▾  ") .. project.name,
 					"collapse=" .. project.id, (if collapsed then "Expand " else "Collapse ") .. project.name .. "\n" .. project.path,
-					"overseer.projectToggle"),
-				text("count", tostring(project.total), "overseer.count"),
-				button("create", "+", "create=" .. project.id, "New worktree from " .. project.base, "overseer.iconButton"),
+					"forge.projectToggle"),
+				text("count", tostring(project.total), "forge.count"),
+				button("create", "+", "create=" .. project.id, "Open or create a worktree: branch, ticket or PR (Super+Alt+Shift+O)", "forge.iconButton"),
 				ui.node("row", { key = "spacer", grow = 1 }, {}),
 			}),
 		}
 		if project.error then
-			table.insert(projectChildren, text("error", project.error, "overseer.error"))
+			table.insert(projectChildren, text("error", project.error, "forge.error"))
 		end
 		if project.loading and #(project.worktrees or {}) == 0 then
-			table.insert(projectChildren, ui.node("col", { key = "loading", role = "overseer.loading" }, {
-				text("label", "Loading worktrees", "overseer.shimmer", { aria = "Loading worktrees" }),
+			table.insert(projectChildren, ui.node("col", { key = "loading", role = "forge.loading" }, {
+				text("label", "Loading worktrees", "forge.shimmer", { aria = "Loading worktrees" }),
 			}))
 		end
 		if not collapsed then
@@ -304,14 +308,14 @@ function View.render(model)
 				table.insert(projectChildren, worktreeNode(worktree, model.activePath))
 			end
 			if not project.loading and not project.error and #(project.worktrees or {}) == 0 and project.hiddenIced == 0 then
-				table.insert(projectChildren, text("empty", "No worktrees found. Refresh to check this repository.", "overseer.hint"))
+				table.insert(projectChildren, text("empty", "No worktrees found. Refresh to check this repository.", "forge.hint"))
 			end
 		end
 		table.insert(children, ui.node("col", {
-			key = "p" .. safeKey(project.id), role = "overseer.project",
+			key = "p" .. safeKey(project.id), role = "forge.project",
 		}, projectChildren))
 	end
-	return ui.node("col", { key = "overseer", role = "overseer.navigator" }, children)
+	return ui.node("col", { key = "forge", role = "forge.navigator" }, children)
 end
 
 return View

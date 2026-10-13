@@ -7,10 +7,11 @@ end
 
 -- Everything that differs between the form's modes. The first field takes focus.
 local MODES = {
-	create = {
-		heading = "New worktree", submit = "Create worktree", fields = { "branch", "name" },
+	open = {
+		heading = "Open worktree", submit = "Open", fields = { "query", "name" },
 		help = function(state)
-			return state.project .. " · New branch from " .. state.base .. ". Worktrunk hooks will run."
+			local note = if state.note ~= "" then " " .. state.note else ""
+			return state.project .. " · New branches start from " .. state.base .. "." .. note
 		end,
 	},
 	rename = {
@@ -35,6 +36,36 @@ local MODES = {
 
 local function fieldOrder(state)
 	return MODES[state.mode].fields
+end
+
+-- At most this many worktrees are suggested under the box.
+local SUGGESTIONS = 8
+
+-- The worktrees the box's text names: substring matches on branch, display name,
+-- ticket, PR number and project, this project's first. Empty text lists this
+-- project's worktrees.
+local function suggestions(state)
+	local query = string.lower(state.fields.query.text:match("^%s*(.-)%s*$"))
+	local out = {}
+	for _, c in state.candidates do
+		local hay = string.lower(table.concat({
+			c.branch or "", c.name or "", c.ticket or "", if c.pr then "#" .. tostring(c.pr) else "", c.project or "",
+		}, " "))
+		local hit = if query == "" then c.here else string.find(hay, query, 1, true) ~= nil
+		if hit then
+			table.insert(out, c)
+			if #out >= SUGGESTIONS then break end
+		end
+	end
+	return out
+end
+
+-- The row Enter acts on: 0 is "open or create what I typed", 1.. a suggestion.
+-- Typing selects the first suggestion when it's in this project (they come
+-- first); another project's worktree is only opened when picked.
+local function resetSelection(state)
+	local first = suggestions(state)[1]
+	state.sel = if string.find(state.fields.query.text, "%S") and first and first.here then 1 else 0
 end
 
 local function focus(state, cx)
@@ -62,12 +93,16 @@ local function finish(state, cancelled)
 	elseif state.mode == "linear" then
 		response = { mode = "linear", linear = state.fields.linear.text }
 	else
-		if not string.find(state.fields.branch.text, "%S") then
-			state.error = "Enter a branch name."
-			state.focus = "branch"
+		local pick = state.sel > 0 and suggestions(state)[state.sel] or nil
+		if pick then
+			response = { mode = "open", path = pick.path }
+		elseif not string.find(state.fields.query.text, "%S") then
+			state.error = "Enter a branch, ticket or pull request, or pick a worktree."
+			state.focus = "query"
 			return
+		else
+			response = { mode = "open", query = state.fields.query.text, name = state.fields.name.text }
 		end
-		response = { mode = "create", branch = state.fields.branch.text, name = state.fields.name.text }
 	end
 	local ok, err = pcall(tern.kv.set, "form:" .. state.token, response)
 	if not ok then
@@ -79,16 +114,16 @@ end
 
 tern.block.define("form", {
 	init = function(_cx, args, saved)
-		local mode = if MODES[args[2]] then args[2] else "create"
+		local mode = if MODES[args[2]] then args[2] else "open"
 		local state = {
 			token = args[1] or "", mode = mode, project = args[3] or "",
-			base = args[4] or "master",
+			base = args[4] or "master", note = args[5] or "",
 			focus = MODES[mode].fields[1],
 			submitted = false, cancelled = false, focusScheduled = false,
 		}
 		state.fields = {
 			name = Input.new(if mode == "rename" then args[4] or "" else ""),
-			branch = Input.new(""),
+			query = Input.new(""),
 			base = Input.new(if mode == "base" then args[4] or "" else ""),
 			linear = Input.new(if mode == "linear" then args[4] or "" else ""),
 		}
@@ -104,6 +139,14 @@ tern.block.define("form", {
 			state.submitted = saved.submitted == true
 			state.cancelled = saved.cancelled == true
 		end
+		-- The Open box's worktrees, put in kv by Forge's window half before opening the form.
+		state.candidates = {}
+		if mode == "open" and state.token ~= "" then
+			local ok, list = pcall(tern.kv.get, "form-data:" .. state.token)
+			if ok and type(list) == "table" then state.candidates = list end
+		end
+		state.sel = 0
+		resetSelection(state)
 		-- A restarted form must never publish its response a second time.
 		if state.token == "" then
 			state.error = "Missing form token. Close this pane and reopen the form from Projects."
@@ -127,39 +170,70 @@ tern.block.define("form", {
 			-- In a row so the link is only as wide as its text, not the whole pane.
 			ui.node("row", { key = "nav" }, {
 				ui.el("button", {
-					key = "back", role = "overseer.backLink", text = "← Projects",
+					key = "back", role = "forge.backLink", text = "← Projects",
 					title = "Back to Projects (Esc)", actions = { click = "cancel" },
 				}),
 			}),
-			text("heading", heading, "overseer.formHeading"),
+			text("heading", heading, "forge.formHeading"),
 		}
 		if state.submitted then
-			table.insert(children, text("submitted", if state.cancelled then "Returning to Projects…" else "Working…", "overseer.message"))
+			table.insert(children, text("submitted", if state.cancelled then "Returning to Projects…" else "Working…", "forge.message"))
 		else
-			table.insert(children, text("help", MODES[state.mode].help(state), "overseer.hint"))
+			table.insert(children, text("help", MODES[state.mode].help(state), "forge.hint"))
 			local labels = {
-				name = "Display name (optional)", branch = "Branch name", base = "Base branch",
+				name = if state.mode == "open" then "Display name for a new worktree (optional)" else "Display name (optional)",
+				query = "Branch, ticket or pull request", base = "Base branch",
 				linear = "Workspace URL or name",
 			}
 			local placeholders = {
 				name = if state.mode == "rename" then state.project else "e.g. Fix onboarding",
-				branch = "feature/branch-name", base = "main", linear = "https://linear.app/your-team",
+				query = "branch · ENG-123 · #42 · link", base = "main", linear = "https://linear.app/your-team",
 			}
 			for _, name in ipairs(fieldOrder(state)) do
-				table.insert(children, text(name .. "Label", labels[name], "overseer.fieldLabel"))
+				table.insert(children, text(name .. "Label", labels[name], "forge.fieldLabel"))
 				local props = Input.props(state.fields[name])
-				props.key, props.role, props.aria = name, "overseer.field", labels[name]
+				props.key, props.role, props.aria = name, "forge.field", labels[name]
 				props.placeholder = placeholders[name]
 				table.insert(children, ui.node("input", props))
+				if name == "query" then
+					local typed = state.fields.query.text:match("^%s*(.-)%s*$")
+					local rows = {}
+					if typed ~= "" then
+						table.insert(rows, ui.el("button", {
+							key = "typed", role = if state.sel == 0 then "forge.suggestionOn" else "forge.suggestion",
+							text = "↵ Open or create “" .. typed .. "”", actions = { click = "pick=0" },
+						}))
+					end
+					for index, c in ipairs(suggestions(state)) do
+						local meta = {}
+						if c.name and c.name ~= c.branch then table.insert(meta, c.branch or "detached") end
+						if c.ticket then table.insert(meta, c.ticket) end
+						if c.pr then table.insert(meta, "#" .. tostring(c.pr) .. " " .. (c.prState or "")) end
+						if not c.here then table.insert(meta, c.project) end
+						if c.primary then table.insert(meta, "primary") end
+						table.insert(rows, ui.el("button", {
+							key = "s" .. index, role = if state.sel == index then "forge.suggestionOn" else "forge.suggestion",
+							title = c.path, actions = { click = "pick=" .. index },
+						}, {
+							text("label", c.name or c.branch or "Detached HEAD", "forge.suggestionLabel"),
+							text("meta", table.concat(meta, " · "), "forge.suggestionMeta"),
+						}))
+					end
+					if #rows > 0 then
+						table.insert(children, ui.node("col", { key = "suggestions", role = "forge.suggestions" }, rows))
+					end
+				end
 			end
-			table.insert(children, ui.node("row", { key = "buttons", role = "overseer.formButtons" }, {
+			table.insert(children, ui.node("row", { key = "buttons", role = "forge.formButtons" }, {
 				ui.el("button", {
-					key = "submit", role = "overseer.primaryButton",
+					key = "submit", role = "forge.primaryButton",
 					text = MODES[state.mode].submit,
 					actions = { click = "submit" },
 				}),
 			}))
-			table.insert(children, text("keys", "Enter to submit · Esc to go back · Tab to change fields", "overseer.hint"))
+			table.insert(children, text("keys", if state.mode == "open"
+				then "↑↓ to choose · Enter to open · Esc to go back · Tab to the display name"
+				else "Enter to submit · Esc to go back · Tab to change fields", "forge.hint"))
 			if not state.focusScheduled then
 				state.focusScheduled = true
 				-- Timer executes after this view mounts; a closed pane safely ignores focus.
@@ -171,9 +245,9 @@ tern.block.define("form", {
 			end
 		end
 		if state.error then
-			table.insert(children, text("error", state.error, "overseer.error"))
+			table.insert(children, text("error", state.error, "forge.error"))
 		end
-		return { main = ui.node("col", { role = "overseer.form" }, children) }
+		return { main = ui.node("col", { role = "forge.form" }, children) }
 	end,
 	key = function(state, key, cx)
 		if state.submitted then
@@ -184,6 +258,11 @@ tern.block.define("form", {
 		elseif key.name == "enter" then
 			finish(state, false)
 			if not state.submitted then focus(state, cx) end
+		elseif state.mode == "open" and state.focus == "query" and (key.name == "up" or key.name == "down") then
+			local count = #suggestions(state)
+			local first = if string.find(state.fields.query.text, "%S") then 0 else 1
+			if count == 0 then return false end
+			state.sel = math.clamp(state.sel + (if key.name == "up" then -1 else 1), first, count)
 		elseif key.name == "tab" then
 			local order = fieldOrder(state)
 			local index = table.find(order, state.focus) or 1
@@ -194,9 +273,11 @@ tern.block.define("form", {
 			if selection == "" then return false end
 			cx:copy(selection)
 		else
+			local before = state.fields[state.focus].text
 			local handled, err = Input.key(state.fields[state.focus], key)
 			if not handled then return false end
 			state.error = err
+			if state.focus == "query" and state.fields.query.text ~= before then resetSelection(state) end
 			focus(state, cx)
 		end
 		return true
@@ -218,7 +299,10 @@ tern.block.define("form", {
 				end
 			end
 		elseif event.ev == "action" then
-			if event.act == "submit" then
+			if event.act == "pick" then
+				state.sel = tonumber(event.value) or 0
+				finish(state, false)
+			elseif event.act == "submit" then
 				finish(state, false)
 			elseif event.act == "cancel" then
 				finish(state, true)
@@ -235,3 +319,6 @@ tern.block.define("form", {
 		}
 	end,
 })
+
+-- The subscription usage block (`forge.usage`).
+require("./usage/host")
