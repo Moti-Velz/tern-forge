@@ -28,6 +28,8 @@ export type Def = {
 	then_prompt: string?,
 	-- What the connect picker says it needs (default "API key").
 	needs: string?,
+	-- Several accounts: combines the stored credential with a newly entered one (connecting adds).
+	merge: ((existing: string?, new: string) -> string)?,
 	-- One page of meetings, newest first; `cursor` continues.
 	list: (cred: string, cursor: string?, done: Done<Page>) -> (),
 	-- One meeting in full; with `transcript`, also its transcript.

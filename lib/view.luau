@@ -238,6 +238,14 @@ function View.render(s: State, rows: number): BlockView
 	else
 		local items: { any } = {}
 		local seen: { [string]: boolean } = {}
+		local accts: { [string]: boolean } = {}
+		local tab_accounts = 0
+		for _, n in shown do
+			if n.account and not accts[n.account] then
+				accts[n.account] = true
+				tab_accounts += 1
+			end
+		end
 		local tab_sources = 0
 		for _, n in shown do
 			if n.source and not seen[n.source] then
@@ -254,6 +262,9 @@ function View.render(s: State, rows: number): BlockView
 			local from = context.SOURCES[n.source or ""]
 			if s.tab == "meetings" and tab_sources > 1 and from then
 				table.insert(parts, from)
+			end
+			if s.tab == "email" and tab_accounts > 1 and n.account then
+				table.insert(parts, n.account)
 			end
 			local who = attendees(s.details[n.id] or (if n.attendees then n else nil), 3)
 			if who then

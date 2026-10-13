@@ -57,6 +57,40 @@ end
 
 local HELPER = tern.plugin.dir .. "/lib/sources/email_imap.py"
 
+-- The stored credential holds every account: a JSON array of "address[ server]\npassword" strings.
+-- A bare "address\npassword" (one account, before there could be several) still reads.
+local function accounts(cred: string): { string }
+	if string.sub(cred, 1, 1) == "[" then
+		local ok, list = pcall(tern.json.decode, cred)
+		if ok and type(list) == "table" then
+			local out = {}
+			for _, a in list do
+				if type(a) == "string" then
+					table.insert(out, a)
+				end
+			end
+			return out
+		end
+	end
+	return { cred }
+end
+
+local function address(acct: string): string
+	return string.lower(string.match(acct, "^%s*(%S+)") or "")
+end
+
+-- Adds the account in `new`, replacing one with the same address.
+local function merge(existing: string?, new: string): string
+	local out = {}
+	for _, a in (if existing then accounts(existing) else {}) do
+		if address(a) ~= address(new) then
+			table.insert(out, a)
+		end
+	end
+	table.insert(out, new)
+	return tern.json.encode(tern.json.array(out))
+end
+
 local function call(cred: string, req: { [string]: any }, done: (res: any?, err: string?, cx: WindowCx) -> ())
 	local acct, aerr = account(cred)
 	if acct == nil then
@@ -104,32 +138,81 @@ local function meeting(n: any): any
 	return m
 end
 
+-- Every account's threads, merged; the cursor is a JSON object of each account's own cursor.
 local function list(cred: string, cursor: string?, done: source.Done<source.Page>)
-	call(cred, { op = "list", cursor = cursor }, function(res, err, cx)
-		if err then
-			done(nil, err, cx)
-			return
+	local accts = accounts(cred)
+	local prev: { [string]: any } = {}
+	if cursor then
+		local ok, c = pcall(tern.json.decode, cursor)
+		if ok and type(c) == "table" then
+			prev = c
 		end
-		local notes = {}
-		for _, n in res.notes or {} do
-			table.insert(notes, meeting(n))
+	end
+	local todo = {}
+	for _, a in accts do
+		if cursor == nil or type(prev[address(a)]) == "string" then
+			table.insert(todo, a)
 		end
-		local next_cursor = if type(res.cursor) == "string" then res.cursor else nil
-		done({ notes = notes, cursor = next_cursor }, nil, cx)
-	end)
+	end
+	local notes, nexts, errs, pending = {}, {}, {}, #todo
+	local any_next = false
+	if pending == 0 then
+		tern.timer(0, function(cx)
+			done({ notes = {}, cursor = nil }, nil, cx :: WindowCx)
+		end)
+		return
+	end
+	for _, a in todo do
+		local addr = address(a)
+		call(a, { op = "list", cursor = if cursor then prev[addr] else nil }, function(res, err, cx)
+			if err then
+				table.insert(errs, addr .. ": " .. err)
+			else
+				for _, n in res.notes or {} do
+					local m = meeting(n)
+					-- The id names the account so details are fetched from the right mailbox.
+					m.id = "email:" .. addr .. "|" .. string.gsub(m.id, "^email:", "")
+					m.account = addr
+					table.insert(notes, m)
+				end
+				if type(res.cursor) == "string" then
+					nexts[addr] = res.cursor
+					any_next = true
+				end
+			end
+			pending -= 1
+			if pending == 0 then
+				if #notes == 0 and #errs > 0 then
+					done(nil, table.concat(errs, " · "), cx)
+					return
+				end
+				done({ notes = notes, cursor = if any_next then tern.json.encode(nexts) else nil }, nil, cx)
+			end
+		end)
+	end
 end
 
 local function note(cred: string, id: string, _transcript: boolean, done: source.Done<any>)
+	local addr, rest = string.match(id, "^(.-)|(.*)$")
+	local acct = accounts(cred)[1]
+	for _, a in accounts(cred) do
+		if addr and address(a) == addr then
+			acct = a
+		end
+	end
 	local uids = {}
-	for uid in string.gmatch(id, "%d+") do
+	for uid in string.gmatch(rest or id, "%d+") do
 		table.insert(uids, tonumber(uid))
 	end
-	call(cred, { op = "thread", uids = tern.json.array(uids) }, function(res, err, cx)
+	call(acct, { op = "thread", uids = tern.json.array(uids) }, function(res, err, cx)
 		if err then
 			done(nil, err, cx)
 			return
 		end
-		done(meeting(res.note), nil, cx)
+		local m = meeting(res.note)
+		m.id = "email:" .. (addr or address(acct)) .. "|" .. string.gsub(m.id, "^email:", "")
+		m.account = addr or address(acct)
+		done(m, nil, cx)
 	end)
 end
 
@@ -139,8 +222,9 @@ local def: source.Def = {
 	credential = "secret",
 	secret = "email-account",
 	needs = "address + app password",
-	prompt = "Email address (add the IMAP server after a space if it isn't guessed, e.g. you@acme.com imap.acme.com)",
+	prompt = "Email address to add (Google Workspace and other domains: add the server after a space, e.g. you@acme.com imap.gmail.com)",
 	then_prompt = "App password (Gmail: myaccount.google.com/apppasswords, needs 2-step verification)",
+	merge = merge,
 	list = list,
 	note = note,
 }

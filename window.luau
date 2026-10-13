@@ -189,8 +189,9 @@ local function connect(cx: WindowCx, after: (cx: WindowCx) -> ())
 						if second == nil or trim(second) == "" then
 							return
 						end
-						store(c5 :: WindowCx, def, v .. "\n" .. trim(second), function(c4)
-							c4:toast("success", def.name .. " connected")
+						local entry = v .. "\n" .. trim(second)
+						store(c5 :: WindowCx, def, if def.merge then def.merge(creds[def.id], entry) else entry, function(c4)
+							c4:toast("success", if def.merge then def.name .. ": " .. v .. " added" else def.name .. " connected")
 							after(c4)
 						end)
 					end)
