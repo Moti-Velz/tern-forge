@@ -77,3 +77,7 @@ hyprctl eval 'tern_nav.press("SUPER + LEFT")'
   `hyprctl repl 'return tern_nav.handles(hl.get_active_window())'` shows the current decision.
 - When Tern hands a move back, Hyprland's own rules apply. A focus move past the last window wraps
   around, just as it does for ordinary windows.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
