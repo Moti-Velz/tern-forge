@@ -9,9 +9,23 @@
 -- defaults did. Each bind below replaces an Omarchy default, named in its comment.
 
 local TERN_CLASS = "so.stencil.tern"
+local HEARTBEATS = (os.getenv("XDG_RUNTIME_DIR") or "/tmp") .. "/tern-omarchy/"
+-- The plugin rewrites its heartbeat every 2 s; older than this means it isn't running.
+local HEARTBEAT_MAX_AGE = 6
 
+-- Whether `window` is a Tern window whose plugin is running (lib/heartbeat.luau). Only those get
+-- keys handed over; any other Tern window keeps Omarchy's defaults rather than dead keys.
 local function is_tern(window)
-  return window ~= nil and window.class == TERN_CLASS
+  if window == nil or window.class ~= TERN_CLASS then
+    return false
+  end
+  local file = io.open(HEARTBEATS .. tostring(window.pid), "r")
+  if not file then
+    return false
+  end
+  local stamp = tonumber(file:read("*l"))
+  file:close()
+  return stamp ~= nil and os.time() - stamp <= HEARTBEAT_MAX_AGE
 end
 
 -- Injects a chord into the focused window; the down/up split mirrors Omarchy's clipboard binds,
@@ -25,7 +39,7 @@ end
 
 -- Every bind's function, by its keys, so `hyprctl eval 'tern_nav.press("SUPER + LEFT")'` runs exactly
 -- what the key runs (scripts and tests can't press bound keys: virtual keyboards don't trigger binds).
-tern_nav = { binds = {} }
+tern_nav = { binds = {}, handles = is_tern }
 function tern_nav.press(keys)
   local fn = tern_nav.binds[keys]
   if fn then

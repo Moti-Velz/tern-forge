@@ -9,6 +9,7 @@
 
 local agents = require("./lib/agents")
 local geometry = require("./lib/geometry")
+local heartbeat = require("./lib/heartbeat")
 local hypr = require("./lib/hypr")
 
 type Dir = geometry.Dir
@@ -197,3 +198,4 @@ tern.bind("cmd+shift+a", "new_agent_block")
 tern.bind("cmd+shift+p", "new_browser_block")
 
 agents.start()
+heartbeat.start()
