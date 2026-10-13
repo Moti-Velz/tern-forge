@@ -10,7 +10,7 @@ Enter to add them to the agent you're working with, as the AI synthesis or with 
 ## Install
 
 ```sh
-tern plugin install github.com/Moti-Velz/tern-factory/meetings
+tern plugin install github.com/Moti-Velz/tern-forge/meetings
 ```
 
 Then press **Alt+G** and `K`, or run **Meetings: Connect a source** from the palette, and connect any
