@@ -148,7 +148,7 @@ local function detail(cx: WindowCx, pane: number, id: string)
 end
 
 -- Fetches the notes `ids` (with transcripts when asked), one at a time to stay well under Granola's
--- rate limit, reusing what previews already loaded.
+-- rate limit, reusing what the details screen already loaded.
 local function gather(cx: WindowCx, pane: number?, ids: { string }, transcript: boolean, done: (notes: { any }, cx: WindowCx) -> ())
 	with_key(cx, function(key, c)
 		if key == nil then

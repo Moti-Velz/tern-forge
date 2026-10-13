@@ -1,8 +1,8 @@
 schema = 1
 id = "granola"
 name = "Granola"
-version = "0.2.0"
-description = "Granola meetings beside your terminal: preview summaries, gather meetings from the keyboard, and add them (synthesis or full transcript) to the agent you're working with."
+version = "0.3.0"
+description = "Granola meetings beside your terminal: browse and open meetings, gather them from the keyboard, and add them (synthesis or full transcript) to the agent you're working with."
 icon = "sparkle"
 host = "host.luau"
 window = "window.luau"

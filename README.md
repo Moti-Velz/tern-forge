@@ -26,7 +26,7 @@ the palette. The key goes into the system keychain (`plugin.granola.api-key`).
 | `↑` `↓` / `j` `k` | Move. Moving past the last meeting loads older ones |
 | `Space` | Gather or release the meeting (✓) |
 | `Enter` | Add the gathered meetings, or the one under the cursor, to the agent |
-| `→` / `←` | Show or hide the preview: attendees and summary of the meeting under the cursor |
+| `→` / `←` | Open the details of the meeting under the cursor (attendees, full summary, actions) / back to the list. In details, `↑` `↓` step through meetings |
 | `Tab` | Switch between **Synthesis** and **Full transcript** |
 | `/` | Filter by title, owner or attendee as you type. `Enter` keeps the filter, `Esc` clears it |
 | `c` / `o` | Copy as Markdown / open in Granola |
@@ -62,7 +62,7 @@ The plugin gives Carly two exports and one piece of context:
 
 - Granola's API only returns meetings that already have an AI summary and transcript. Meetings
   still being processed don't show up.
-- Requests stay well under the rate limit of 5/s: gathered notes are fetched one at a time, and previews are
+- Requests stay well under the rate limit of 5/s: gathered notes are fetched one at a time, and details are
   cached for the window's lifetime. A transcript too large to come inline (`413`) is fetched page by page from
   `/v1/notes/{id}/transcript`.
 - `GRANOLA_API_BASE` in Tern's environment points the client at a different server, such as a proxy or a
@@ -72,7 +72,7 @@ The plugin gives Carly two exports and one piece of context:
 
 | File | Role |
 | --- | --- |
-| `host.luau` | The `granola.meetings` block: keys, mouse events, selection, gathered meetings, preview, filter |
+| `host.luau` | The `granola.meetings` block: keys, mouse events, selection, gathered meetings, list and details screens, filter |
 | `window.luau` | Service for the block: API key, Granola requests, pasting into the agent, focus, Alt+G, Carly exports |
 | `lib/api.luau` | Granola API client (`/v1/notes`, `/v1/notes/{id}`, transcript paging) |
 | `lib/context.luau` | Pure: dates, speaker labels, the Markdown context document and composer attachment |

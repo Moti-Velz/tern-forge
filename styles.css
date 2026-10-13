@@ -9,7 +9,7 @@
 }
 [data-role='granola.heading'],
 [data-role='granola.emptyTitle'],
-[data-role='granola.previewTitle'] {
+[data-role='granola.detailTitle'] {
   font-weight: 650;
 }
 [data-role='granola.filter'] {
@@ -20,13 +20,13 @@
 [data-role='granola.filterText'] {
   color: var(--accent);
 }
-[data-role='granola.preview'] {
+[data-role='granola.detailBody'] {
   gap: 6px;
   margin-top: 6px;
   padding-top: 8px;
   border-top: 1px solid color-mix(in srgb, var(--t4) 35%, transparent);
 }
-[data-role='granola.previewBody'] {
+[data-role='granola.actions'] {
   gap: 6px;
   color: var(--t2);
 }

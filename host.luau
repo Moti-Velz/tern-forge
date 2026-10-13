@@ -1,6 +1,6 @@
 --!strict
 -- Block `granola.meetings`: the Granola panel as a focusable block driven by the keyboard (and the
--- mouse). It owns the UI state: selection, gathered meetings, preview, filter. The window half owns
+-- mouse). It owns the UI state: selection, gathered meetings, list or details screen, filter. The window half owns
 -- what only a window can do (the API key in the keychain, Granola requests, pasting into an agent,
 -- focus), so the block asks it through `tern-granola://VERB?…` links (`cx:open` → `route.link`) and
 -- gets answers back as `granola` action events (`cx.session:event`).
@@ -36,10 +36,10 @@ local function selected(s: State): any?
 	return shown[math.clamp(s.sel, 1, #shown)]
 end
 
--- The preview needs the selected meeting's details; fetched once, then cached.
+-- The details screen needs the selected meeting's details; fetched once, then cached.
 local function want_detail(s: State)
 	local note = selected(s)
-	if s.preview and note and s.details[note.id] == nil and s.detail_errors[note.id] == nil then
+	if s.detail and note and s.details[note.id] == nil and s.detail_errors[note.id] == nil then
 		s.detail_errors[note.id] = nil
 		request(s.cx, "detail", { id = note.id })
 	end
@@ -178,14 +178,15 @@ local function on_key(s: State, k: Key, _cx: BlockCx): boolean?
 		end
 	elseif name == "enter" then
 		attach(s)
-	elseif name == "right" or name == "l" or (name == "p" and not s.preview) then
-		s.preview = true
+	elseif (name == "right" or name == "l") and not s.detail then
+		s.detail = true
 		want_detail(s)
-	elseif name == "left" or name == "h" or name == "p" then
-		s.preview = false
+	elseif (name == "left" or name == "h") and s.detail then
+		s.detail = false
 	elseif name == "tab" then
 		set_mode(s, not s.transcript)
 	elseif name == "/" then
+		s.detail = false
 		s.filtering = true
 	elseif name == "c" then
 		copy(s)
@@ -207,7 +208,9 @@ local function on_key(s: State, k: Key, _cx: BlockCx): boolean?
 	elseif name == "?" then
 		s.help = not s.help
 	elseif name == "escape" then
-		if s.filter then
+		if s.detail then
+			s.detail = false
+		elseif s.filter then
 			s.filter = nil
 		else
 			request(s.cx, "back")
@@ -263,9 +266,22 @@ local function on_event(s: State, ev: UiEvent, cx: BlockCx)
 		want_detail(s)
 	elseif ev.ev == "activate" and idx then
 		s.sel = idx + 1
+		s.detail = true
+		want_detail(s)
+	elseif ev.act == "details" then
+		s.detail = ev.value == "open"
+		want_detail(s)
+	elseif ev.act == "gather" then
 		local note = selected(s)
 		if note then
 			toggle_pick(s, note.id)
+		end
+	elseif ev.act == "copy" then
+		copy(s)
+	elseif ev.act == "web" then
+		local note = selected(s)
+		if note then
+			request(cx, "web", { id = note.id })
 		end
 	elseif ev.act == "attach" then
 		attach(s)
@@ -296,7 +312,7 @@ tern.block.define("meetings", {
 			detail_errors = {},
 			sel = 1,
 			picked = restore_ids(saved),
-			preview = if type(saved) == "table" then saved.preview ~= false else true,
+			detail = false,
 			filter = nil,
 			filtering = false,
 			transcript = tern.kv.get("transcript") == true,
@@ -329,6 +345,6 @@ tern.block.define("meetings", {
 	key = on_key,
 	event = on_event,
 	save = function(s: State): any
-		return { picked = s.picked, preview = s.preview }
+		return { picked = s.picked }
 	end,
 })

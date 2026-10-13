@@ -1,7 +1,7 @@
 --!strict
--- The Granola block's view: a header, the meeting list (the selection is the keyboard cursor), the
--- selected meeting's preview, and a footer with the gathered count, the mode and the keys. Pure:
--- state in, nodes out.
+-- The Granola block's view: the meeting list (the selection is the keyboard cursor) or one meeting's
+-- details screen, and a footer with the gathered count, the mode and the keys. Pure: state in, nodes
+-- out.
 
 local context = require("./context")
 local ui = tern.ui
@@ -18,7 +18,7 @@ export type State = {
 	detail_errors: { [string]: string },
 	sel: number,
 	picked: { string },
-	preview: boolean,
+	detail: boolean,
 	filter: string?,
 	filtering: boolean,
 	transcript: boolean,
@@ -86,22 +86,40 @@ local function attendees(detail: any, max: number): string?
 	return table.concat(names, ", ")
 end
 
-local function preview_node(s: State, note: any?): Node
-	if note == nil then
-		return text("empty", "", "granola.muted")
-	end
+-- The details screen: one meeting, with its people, actions and full summary.
+local function detail_screen(s: State, note: any, pos: number, total: number, picked: boolean): { Node }
 	local id: string = note.id
-	local body: { Node } = {}
 	local detail = s.details[id]
+	local meta = context.when(note.created_at, s.now, s.offset)
+	if detail and type(detail.folder_membership) == "table" and #detail.folder_membership > 0 then
+		meta ..= " · " .. (detail.folder_membership[1].name or "")
+	end
+	local out: { Node } = {
+		ui.node("row", { key = "crumb", role = "granola.header" }, {
+			button("back", "← Meetings", "details=close", "Back to the list (← or esc)", "granola.icon"),
+			text("pos", string.format("%d of %d", pos, total), "granola.muted", { grow = 1 }),
+			if picked then text("picked", "✓ gathered", "granola.count") else text("picked", "", "granola.muted"),
+		}),
+		text("title", context.title(note), "granola.detailTitle"),
+		text("meta", meta, "granola.muted"),
+	}
+	local who = attendees(detail, 12)
+	if who then
+		table.insert(out, text("who", who, "granola.muted"))
+	end
+	table.insert(out, ui.node("row", { key = "actions", role = "granola.actions" }, {
+		button("gather", if picked then "Release" else "Gather", "gather",
+			if picked then "Remove from the gathered meetings (space)" else "Gather this meeting (space)"),
+		button("attach", "Add to agent", "attach", "Add to the agent (⏎)", "granola.primary"),
+		button("copy", "Copy", "copy", "Copy as Markdown (c)"),
+		button("web", "Open in Granola", "web", "Open in Granola (o)"),
+	}))
+	local body: { Node } = {}
 	if s.detail_errors[id] then
 		table.insert(body, text("error", s.detail_errors[id], "granola.error"))
 	elseif detail == nil then
 		table.insert(body, text("loading", "Loading summary…", "granola.muted"))
 	else
-		local who = attendees(detail, 8)
-		if who then
-			table.insert(body, text("who", who, "granola.muted"))
-		end
 		local summary = detail.summary_markdown or detail.summary_text
 		if type(summary) == "string" and string.find(summary, "%S") then
 			table.insert(body, ui.md(summary))
@@ -109,20 +127,22 @@ local function preview_node(s: State, note: any?): Node
 			table.insert(body, text("nosummary", "No summary.", "granola.muted"))
 		end
 	end
-	return ui.node("col", { key = "preview", role = "granola.preview" }, {
-		text("title", context.title(note), "granola.previewTitle"),
-		ui.node("col", { key = "body", role = "granola.previewBody" }, body),
-	})
+	table.insert(out, ui.node("col", { key = "body", role = "granola.detailBody" }, body))
+	return out
 end
 
-local KEYS = {
-	{ "↑↓", "move" }, { "space", "gather" }, { "⏎", "add to agent" }, { "→", "preview" },
+local LIST_KEYS = {
+	{ "↑↓", "move" }, { "→", "details" }, { "space", "gather" }, { "⏎", "add to agent" },
 	{ "tab", "mode" }, { "/", "filter" }, { "?", "more keys" },
 }
+local DETAIL_KEYS = {
+	{ "←", "back" }, { "↑↓", "prev / next" }, { "space", "gather" }, { "⏎", "add to agent" },
+	{ "tab", "mode" }, { "c", "copy" }, { "o", "open in Granola" },
+}
 local MORE_KEYS = {
-	{ "j k", "move" }, { "g G", "top / bottom" }, { "← →", "hide / show preview" },
+	{ "j k", "move" }, { "h l", "back / details" }, { "g G", "top / bottom" },
 	{ "c", "copy as Markdown" }, { "o", "open in Granola" }, { "x", "clear gathered" },
-	{ "r", "reload" }, { "K", "set API key" }, { "esc", "back to the agent" },
+	{ "r", "reload" }, { "K", "set API key" }, { "esc", "back / to the agent" },
 }
 
 local function key_hints(list: { { string } }, key: string): Node
@@ -175,44 +195,42 @@ function View.render(s: State, rows: number): BlockView
 	for _, id in s.picked do
 		picked[id] = true
 	end
-	local items: { any } = {}
 	local cur = math.clamp(s.sel, 1, math.max(1, #shown))
-	for i, n in shown do
-		local detail = context.when(n.created_at, s.now, s.offset)
-		local who = attendees(s.details[n.id], 3)
-		if who then
-			detail ..= " · " .. who
-		end
-		table.insert(items, {
-			-- The cursor is spelled out: the list's own selection highlight is faint in some themes.
-			label = (if i == cur then "▸ " else "  ") .. context.title(n),
-			detail = detail,
-			value = if picked[n.id] then "✓ gathered" else nil,
-			tone = if picked[n.id] then "accent" else nil,
-		})
-	end
-	if #shown == 0 then
+	if s.detail and #shown > 0 then
+		main = detail_screen(s, shown[cur], cur, #shown, picked[shown[cur].id] == true)
+	elseif #shown == 0 then
 		table.insert(main, text("none",
 			if s.loading then "Loading meetings…"
 				elseif #s.notes == 0 then "No summarized meetings yet."
 				else "No meeting matches the filter.",
 			"granola.muted"))
 	else
-		-- The list keeps the selection in view; with the preview open it leaves room below.
-		local lines = if s.preview then math.max(4, math.floor(rows * 0.4)) else math.max(4, rows - 8)
+		local items: { any } = {}
+		for i, n in shown do
+			local detail = context.when(n.created_at, s.now, s.offset)
+			local who = attendees(s.details[n.id], 3)
+			if who then
+				detail ..= " · " .. who
+			end
+			table.insert(items, {
+				-- The cursor is spelled out: the list's own selection highlight is faint in some themes.
+				label = (if i == cur then "▸ " else "  ") .. context.title(n),
+				detail = detail,
+				value = if picked[n.id] then "✓ gathered" else nil,
+				tone = if picked[n.id] then "accent" else nil,
+			})
+		end
+		-- The list fills the block and keeps the selection in view.
 		local list = ui.list(items)
 		local p: { [string]: any } = list.p or {}
 		p.key = "list"
 		p.selected = cur - 1 -- zero-based, like the `item` of its select events
-		p.max = { lines = lines }
+		p.max = { lines = math.max(4, rows - 8) }
 		p.actions = { select = "select", activate = "activate" }
 		list.p = p
 		table.insert(main, list)
 		if s.more then
 			table.insert(main, text("more", "↓ past the last meeting loads older ones", "granola.muted"))
-		end
-		if s.preview then
-			table.insert(main, preview_node(s, shown[math.clamp(s.sel, 1, #shown)]))
 		end
 	end
 
@@ -238,7 +256,7 @@ function View.render(s: State, rows: number): BlockView
 	}))
 	local dock: { Node } = {
 		ui.node("row", { key = "status", role = "granola.status" }, status),
-		key_hints(KEYS, "keys"),
+		key_hints(if s.detail then DETAIL_KEYS else LIST_KEYS, "keys"),
 	}
 	if s.help then
 		table.insert(dock, key_hints(MORE_KEYS, "more"))
