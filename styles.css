@@ -1,69 +1,69 @@
-[data-surface='plugin.granola.meetings'] {
+[data-surface='plugin.meetings.panel'] {
   color: var(--t1);
 }
-[data-role='granola.header'],
-[data-role='granola.filter'],
-[data-role='granola.status'] {
+[data-role='meetings.header'],
+[data-role='meetings.filter'],
+[data-role='meetings.status'] {
   align-items: center;
   gap: 8px;
 }
-[data-role='granola.heading'],
-[data-role='granola.emptyTitle'],
-[data-role='granola.detailTitle'] {
+[data-role='meetings.heading'],
+[data-role='meetings.emptyTitle'],
+[data-role='meetings.detailTitle'] {
   font-weight: 650;
 }
-[data-role='granola.filter'] {
+[data-role='meetings.filter'] {
   padding: 2px 6px;
   border-radius: 6px;
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
-[data-role='granola.filterText'] {
+[data-role='meetings.filterText'] {
   color: var(--accent);
 }
-[data-role='granola.detailBody'] {
+[data-role='meetings.detailBody'] {
   gap: 6px;
   margin-top: 6px;
   padding-top: 8px;
   border-top: 1px solid color-mix(in srgb, var(--t4) 35%, transparent);
 }
-[data-role='granola.actions'] {
+[data-role='meetings.actions'] {
   gap: 6px;
   color: var(--t2);
 }
-[data-role='granola.dock'] {
+[data-role='meetings.dock'] {
   gap: 6px;
   padding: 6px 2px 2px;
   border-top: 1px solid color-mix(in srgb, var(--t4) 35%, transparent);
 }
-[data-role='granola.keys'] {
+[data-role='meetings.keys'] {
   font-size: 0.85em;
   line-height: 1.9;
 }
-[data-role='granola.muted'],
-[data-role='granola.busy'] {
+[data-role='meetings.muted'],
+[data-role='meetings.busy'] {
   color: var(--t3);
   font-size: 0.9em;
 }
-[data-role='granola.busy'] {
+[data-role='meetings.busy'] {
   color: var(--accent);
 }
-[data-role='granola.count'] {
+[data-role='meetings.count'] {
   color: var(--accent);
   font-weight: 600;
 }
-[data-role='granola.error'] {
+[data-role='meetings.error'] {
   color: var(--bad);
 }
-[data-role='granola.empty'] {
+[data-role='meetings.empty'] {
   gap: 8px;
   padding: 16px 4px;
   align-items: flex-start;
 }
-[data-role='granola.button'],
-[data-role='granola.primary'],
-[data-role='granola.icon'],
-[data-role='granola.segmentOn'],
-[data-role='granola.segmentOff'] {
+[data-role='meetings.button'],
+[data-role='meetings.primary'],
+[data-role='meetings.icon'],
+[data-role='meetings.segmentOn'],
+[data-role='meetings.segmentOff'] {
   color: var(--t2);
   background: transparent;
   border: 1px solid color-mix(in srgb, var(--t4) 30%, transparent);
@@ -73,32 +73,32 @@
   font: inherit;
   font-size: 0.9em;
 }
-[data-role='granola.icon'] {
+[data-role='meetings.icon'] {
   padding: 2px 7px;
 }
-[data-role='granola.primary'] {
+[data-role='meetings.primary'] {
   color: var(--accent);
   border-color: var(--accent);
 }
-[data-role='granola.segment'] {
+[data-role='meetings.segment'] {
   gap: 0;
 }
-[data-role='granola.segment'] > :first-child {
+[data-role='meetings.segment'] > :first-child {
   border-radius: 6px 0 0 6px;
 }
-[data-role='granola.segment'] > :last-child {
+[data-role='meetings.segment'] > :last-child {
   border-radius: 0 6px 6px 0;
   border-left: 0;
 }
-[data-role='granola.segmentOn'] {
+[data-role='meetings.segmentOn'] {
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
-[data-role='granola.button']:hover,
-[data-role='granola.primary']:hover,
-[data-role='granola.icon']:hover,
-[data-role='granola.segmentOff']:hover {
+[data-role='meetings.button']:hover,
+[data-role='meetings.primary']:hover,
+[data-role='meetings.icon']:hover,
+[data-role='meetings.segmentOff']:hover {
   color: var(--t1);
   background: color-mix(in srgb, var(--accent) 9%, transparent);
 }

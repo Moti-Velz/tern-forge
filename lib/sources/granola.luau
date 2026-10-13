@@ -129,8 +129,7 @@ local def: source.Def = {
 	id = "granola",
 	name = NAME,
 	credential = "secret",
-	-- The name the key had before there were other sources, so existing installs keep it.
-	secret = "api-key",
+	secret = "granola-key",
 	prompt = "Granola API key (grn_…), from Granola › Settings › Connectors › API keys",
 	list = list,
 	note = note,

@@ -20,7 +20,7 @@ for _, def in SOURCES do
 	BY_ID[def.id] = def
 end
 
-local KIND = tern.plugin.id .. ".meetings"
+local KIND = tern.plugin.id .. ".panel"
 local LOCAL_DIR = "local-dir"
 
 -- Each source's credential once read: the API key or the folder; nil when not connected.
@@ -493,7 +493,7 @@ local function toggle(cx: WindowCx)
 end
 
 tern.command({
-	id = "meetings",
+	id = "toggle",
 	title = "Meetings: Jump in and back",
 	icon = "sparkle",
 	keys = { "alt+g" },

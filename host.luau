@@ -1,5 +1,5 @@
 --!strict
--- Block `<plugin>.meetings`: the meetings panel as a focusable block driven by the keyboard (and the
+-- Block `<plugin>.panel`: the meetings panel as a focusable block driven by the keyboard (and the
 -- mouse). It owns the UI state: selection, gathered meetings, list or details screen, filter. The window half owns
 -- what only a window can do (credentials, requests to the meeting sources, pasting into an agent,
 -- focus), so the block asks it through `tern-<plugin>://VERB?…` links (`cx:open` → `route.link`,
@@ -302,7 +302,7 @@ local function on_event(s: State, ev: UiEvent, cx: BlockCx)
 	cx:save()
 end
 
-tern.block.define("meetings", {
+tern.block.define("panel", {
 	init = function(cx: BlockCx, _args: { string }, saved: any): State
 		local s: State = {
 			cx = cx,

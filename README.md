@@ -10,7 +10,7 @@ as the AI synthesis or with full transcripts.
 ## Install
 
 ```sh
-tern plugin install https://github.com/Moti-Velz/tern-granola
+tern plugin install https://github.com/Moti-Velz/tern-meetings
 ```
 
 Then press **Alt+G** and `K`, or run **Meetings: Connect a source** from the palette, and connect any
@@ -22,7 +22,7 @@ of these:
 | **Fireflies** | An API key: app.fireflies.ai › **Integrations › Fireflies API**. Free plans get 500 requests a day, which is plenty here |
 | **Local folder** | A folder of exports: Markdown notes (`.md`), plain text (`.txt`) and captions (`.vtt`, `.srt`) |
 
-API keys go into the system keychain (`plugin.granola.*`). The folder path goes into the plugin's
+API keys go into the system keychain (`plugin.meetings.granola-key`, `plugin.meetings.fireflies-key`). The folder path goes into the plugin's
 settings. Connecting a source again with an empty answer disconnects it. Meetings from every connected
 source are listed together, newest first, each tagged with its source.
 
@@ -64,14 +64,14 @@ transcript, and so does any meeting that has only a transcript. Up to 6000 chara
 pasted inline inside `<meeting-context>`. A longer one is written to
 `<plugin data>/context/<timestamp>-<title>.md`, and only that path is added to the composer.
 
-If something else already uses Alt+G, rebind `plugin.granola.meetings` in Tern's keybinds.
+If something else already uses Alt+G, rebind `plugin.meetings.toggle` in Tern's keybinds.
 
 ## Carly
 
 The plugin gives Carly two exports and one piece of context:
 
-- `plugins.granola.recent()` returns recent meetings from all sources as `{id, title, when, source}`.
-- `plugins.granola.note(id, transcript?)` returns one meeting as Markdown.
+- `plugins.meetings.recent()` returns recent meetings from all sources as `{id, title, when, source}`.
+- `plugins.meetings.note(id, transcript?)` returns one meeting as Markdown.
 - Context: the titles of the meetings currently gathered in the panel, so you can say things like
   "add these to the frugio agent".
 
@@ -82,8 +82,8 @@ The plugin gives Carly two exports and one piece of context:
   cached for the window's lifetime, and Fireflies sentences are only requested in Full transcript mode.
 - `GRANOLA_API_BASE` and `FIREFLIES_API_BASE` in Tern's environment point the clients at a different
   server, such as a proxy or a test stub.
-- The repo and plugin id are still `granola` from before other sources existed, so installs and saved
-  keys keep working.
+- Upgrading from the old `tern-granola` plugin (id `granola`): remove it with `tern plugin remove granola`,
+  install this one, and connect Granola again. Keys can't move between plugin ids.
 
 ## Adding a source
 
@@ -97,13 +97,13 @@ and add its display name to `context.SOURCES`.
 
 | File | Role |
 | --- | --- |
-| `host.luau` | The `granola.meetings` block: keys, mouse events, selection, gathered meetings, list and details screens, filter |
+| `host.luau` | The `meetings.panel` block: keys, mouse events, selection, gathered meetings, list and details screens, filter |
 | `window.luau` | Service for the block: credentials, source requests, pasting into the agent, focus, Alt+G, Carly exports |
 | `lib/sources/` | `granola`, `fireflies` and `local` sources, and `source.luau`, the contract they share |
 | `lib/link.luau` | The internal links the block and the window half talk through |
 | `lib/context.luau` | Pure: dates, speaker labels, the Markdown context document and composer attachment |
 | `lib/view.luau` | Pure: the block's view |
-| `styles.css` | Panel styling (`data-role='granola.*'`) |
+| `styles.css` | Panel styling (`data-role='meetings.*'`) |
 
 ## License
 
