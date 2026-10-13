@@ -8,20 +8,20 @@ if [ "$#" -ne 8 ]; then
 fi
 
 mode=$1
-backend=$2   # worktrunk, orca or git
-tool=$3      # wt or Orca's CLI; empty for git
+backend=$2   # worktrunk or git
+tool=$3      # wt; empty for git
 repo=$4
 target=$5    # create: the new branch; remove: the worktree path
 option=$6    # create: the base branch; remove: the worktree's branch
 receipt=$7
-hook=$8      # git only: orca.yaml's setup (create) or archive (remove) script
+hook=$8      # git only: the setup (create) or archive (remove) script, from orca.yaml or Orca's settings
 case "$mode" in
     create) label='Worktree creation' ;;
     remove) label='Worktree removal' ;;
     *) printf 'Unknown operation: %s\n' "$mode" >&2; exit 64 ;;
 esac
 case "$backend" in
-    worktrunk|orca) [ -n "$tool" ] || { printf 'No executable given for %s.\n' "$backend" >&2; exit 64; } ;;
+    worktrunk) [ -n "$tool" ] || { printf 'No executable given for %s.\n' "$backend" >&2; exit 64; } ;;
     git) ;;
     *) printf 'Unknown backend: %s\n' "$backend" >&2; exit 64 ;;
 esac
@@ -77,11 +77,12 @@ printf '%s\n' "$$" > "${receipt}.pid" || exit 73
 
 # orca.yaml's contract, as Orca's hook runner does it: /bin/bash from the
 # worktree root with ORCA_WORKTREE_PATH, ORCA_ROOT_PATH and ORCA_WORKSPACE_NAME
-# set; the archive hook gets 120 seconds.
+# set; the archive hook gets 120 seconds. The script comes from orca.yaml or,
+# for a repository registered in Orca, from Orca's own settings.
 run_orca_hook() {
     local name=$1 worktree=$2
     [ -n "$hook" ] || return 0
-    printf 'Running the orca.yaml %s script in %s\n\n' "$name" "$worktree"
+    printf 'Running the %s script in %s\n\n' "$name" "$worktree"
     if [ "$name" = archive ] && command -v timeout >/dev/null 2>&1; then
         (cd "$worktree" && ORCA_WORKTREE_PATH="$worktree" ORCA_ROOT_PATH="$repo" ORCA_WORKSPACE_NAME="${worktree##*/}" \
             timeout 120 /bin/bash -c "$hook")
@@ -91,7 +92,7 @@ run_orca_hook() {
     fi
     local status=$?
     if [ "$status" -ne 0 ]; then
-        printf '\nThe orca.yaml %s script failed (exit %s).\n' "$name" "$status" >&2
+        printf '\nThe %s script failed (exit %s).\n' "$name" "$status" >&2
     fi
     return "$status"
 }
@@ -100,15 +101,6 @@ create_worktree() {
     case "$backend" in
         worktrunk)
             "$tool" -C "$repo" switch --create --base "$option" --no-cd "$target"
-            ;;
-        orca)
-            # Orca owns the path and branch naming; its JSON answer names the
-            # worktree it made, which Forge reads beside the receipt.
-            "$tool" worktree create --repo "path:$repo" --name "$target" --base-branch "$option" --no-parent --json \
-                > "${receipt}.result"
-            local status=$?
-            /bin/cat "${receipt}.result"
-            return "$status"
             ;;
         git)
             # Beside the primary checkout, as Worktrunk's default template does.
@@ -149,12 +141,6 @@ remove_worktree() {
     case "$backend" in
         worktrunk)
             "$tool" -C "$repo" remove --foreground --no-delete-branch -- "$target"
-            status=$?
-            ;;
-        orca)
-            # As archiving in Orca's app does: run orca.yaml's archive hook, and
-            # let a failed hook stop the removal.
-            "$tool" worktree rm --worktree "path:$target" --run-hooks --json
             status=$?
             ;;
         git)

@@ -205,9 +205,19 @@ local function ticketOf(branch)
 	return branch and string.match(branch, "%f[%w](%u[%u%d]*%-%d+)%f[%W]")
 end
 
--- The worktree's Linear ticket and its link, in the project's workspace or the CLI's.
+-- The worktree's Linear ticket and its link: the one linked to its branch
+-- (git config branch.<branch>.forge-ticket, set from the panel, by agents, or
+-- copied in from Orca), else an id in the branch name. Ids link into the
+-- project's Linear workspace, else the CLI's; URLs link as they are.
 local function ticketFor(project, worktree)
 	local workspace = project.linear or linearDefault
+	local link = worktree.ticket_link
+	if link then
+		local url = if string.match(link, "^https?://") then link
+			elseif workspace then "https://linear.app/" .. workspace .. "/issue/" .. link
+			else nil
+		return { id = string.match(link, "(%u[%u%d]*%-%d+)") or link, url = url }
+	end
 	local id = workspace and not worktree.is_main and ticketOf(worktree.branch)
 	if not id then return nil end
 	return { id = id, url = "https://linear.app/" .. workspace .. "/issue/" .. id }
@@ -241,7 +251,6 @@ local function model(cx)
 			item.displayName = names[project.id] and names[project.id][worktree.path] or worktree.orca and worktree.orca.name
 			item.pr = not worktree.is_main and worktree.branch and entry.prs and entry.prs[worktree.branch] or nil
 			item.ticket = ticketFor(project, worktree)
-				or (worktree.orca and worktree.orca.linear and worktree.orca.linear.url and worktree.orca.linear)
 			local session = boundSession(worktree.path, sessions, bindings)
 			item.session, item.tabs = session, session and tabs[tostring(session.id)] or {}
 			item.agent = session and activity.sessions[tostring(session.id)]
@@ -1226,11 +1235,11 @@ local function changeLinear(cx, pane, request, response)
 	redraw(cx)
 end
 
--- The new worktree: the path Orca reported, else the one on the job's branch
--- (Git and Worktrunk create exactly that branch).
+-- The new worktree: the one on the job's branch (Git and Worktrunk create
+-- exactly that branch).
 local function createdTree(job, trees)
 	for _, tree in trees do
-		if not tree.is_main and (if job.path then tree.path == job.path else tree.branch == job.branch) then
+		if not tree.is_main and tree.branch == job.branch then
 			return tree
 		end
 	end
@@ -1363,21 +1372,6 @@ local function checkJobs(cx)
 			status = tonumber(tern.fs.read(job.receipt))
 			if status == nil then status = -1 end
 			tern.fs.remove(job.receipt)
-			-- Orca names the worktree it created in its JSON answer.
-			local resultFile = job.receipt .. ".result"
-			if job.kind == "create" and tern.fs.exists(resultFile) then
-				-- The JSON envelope, even if the CLI printed a warning line around it.
-				local ok, answer = pcall(function()
-					return tern.json.decode(string.match(tern.fs.read(resultFile), "%b{}") or "")
-				end)
-				local created = ok and type(answer) == "table" and type(answer.result) == "table" and answer.result.worktree
-				if type(created) == "table" then
-					job.path = if type(created.path) == "string" then created.path
-						elseif type(created.id) == "string" then string.match(created.id, "::(/.+)$")
-						else nil
-				end
-				tern.fs.remove(resultFile)
-			end
 		else
 			local pane = cx.session:pane(job.pane)
 			if (not pane or pane.exited ~= nil or pane.error) and helperFailed(id, job) then status = -1 end
@@ -1491,6 +1485,10 @@ tern.carly.export("ticket_worktree", {
 			branch = branch, agentPrompt = string.format(TICKET_PROMPT, ticket),
 		})
 		if launchError then call:fail(launchError); return end
+		-- The branch is linked to its ticket before it exists: git config doesn't mind.
+		wt.set_ticket(project, branch, ticket, function(linked, linkErr)
+			if not linked then tern.log.warn("Ticket link not saved for " .. branch .. ": " .. tostring(linkErr)) end
+		end)
 		nextCx:toast("info", "Creating worktree", notificationLabel(branch))
 		redraw(nextCx)
 		call:reply({
@@ -1535,6 +1533,23 @@ tern.on("canvas_action", function(ev, cx)
 		local project = projectById(view.projectId(ev.node))
 		if project then openForm(cx, if ev.act == "Change base branch" then "base" else "linear", project)
 		else report(cx, "Project not found. Refresh Projects.") end
+	elseif ev.act == "Link ticket" then
+		local project, worktree = findWorktree(view.worktreePath(ev.node))
+		if not project or not worktree.branch then report(cx, "Worktree not found. Refresh Projects."); return true end
+		cx:prompt({
+			value = worktree.ticket_link or "", icon = "link", action = "link",
+			placeholder = "Linear issue for " .. worktree.branch .. " (ENG-123 or its URL); empty unlinks",
+		}):next(function(value, _err, promptCx)
+			if not promptCx or type(value) ~= "string" then return end
+			local ticket = value:match("^%s*(.-)%s*$")
+			wt.set_ticket(project, worktree.branch, ticket, function(ok, err, setCx)
+				if not setCx then return end
+				if not ok then report(setCx, err, "Ticket not linked"); return end
+				setCx:toast("info", if ticket == "" then "Ticket unlinked" else "Ticket linked",
+					notificationLabel(worktree.branch .. (if ticket == "" then "" else " → " .. ticket)))
+				refresh(setCx)
+			end)
+		end)
 	elseif ev.act == "Visualize PR" then
 		visualizePr(cx, view.worktreePath(ev.node))
 	elseif ev.act == "Rename" then

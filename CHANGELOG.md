@@ -4,7 +4,10 @@
 
 ### Changed
 
+- **Breaking: Forge owns every project's worktrees; Orca is only a source.** Forge no longer creates or deletes worktrees through Orca (`orca-ide worktree create` / `rm`). Every project uses Worktrunk when `wt` is installed, else plain Git. Orca is read, never written: its repositories, the setup and archive scripts in its settings (used when the checkout has no `orca.yaml`), and each worktree's name, comment, board status and Linear link. Worktrees Orca created are ordinary Git worktrees and keep showing.
 - **Orca projects appear on their own.** Every repository registered in Orca joins Projects when Tern starts (or Forge reloads) and on ↻. Nothing is asked, and one toast names what was added. Projects only grows: a repository already listed is left as it is. **Add project from Orca** is still in the palette.
+- **Ticket links per worktree.** Right-click a worktree → **Link ticket** links its branch to a Linear issue (an id like `ENG-123`, or the issue URL). The link is stored in Git as `branch.<branch>.forge-ticket`: repository-local, never pushed, and settable by agents with one `git config` command. `ticket_worktree` links the branches it creates, and an Orca Linear link is copied in once when the branch has none. A linked ticket beats an id in the branch name.
+- **Agent skill `link-ticket`** (`skills/link-ticket/`). Teaches agents to link, check and unlink the current worktree's ticket.
 - **The Projects panel is a sidebar.** It opens 40 columns wide instead of 30% of the tab, which was over 1000 px on wide screens. The width you drag it to is remembered in columns (`panel-columns`, 20–120), and a panel left open from an older version is narrowed once when Forge loads.
 
 ## 3.0.0 (2026-10-12)

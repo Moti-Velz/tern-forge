@@ -1,7 +1,9 @@
 -- Worktree backends. Read-only discovery uses argv subprocesses; creation and
--- removal run in a terminal. A project's worktrees are managed by Orca when the
--- repository is registered in a running Orca, by Worktrunk when `wt` is
--- installed, and by plain Git otherwise. Listing always reads Git itself.
+-- removal run in a terminal. Forge manages every project's worktrees itself: with
+-- Worktrunk when `wt` is installed, else with plain Git. Orca is only a source:
+-- its registered repositories, their setup scripts, and each worktree's name,
+-- comment, board status and Linear link are read in, never written back.
+-- Listing always reads Git itself.
 local M = {}
 local TIMEOUT_MS = 15000
 
@@ -80,7 +82,7 @@ local function orca_cli()
 	return find_executable("orca-ide") or (if tern.runtime.os == "macos" then find_executable("orca") else nil)
 end
 
--- [project.id] = { kind = "orca" | "worktrunk" | "git", tool = path?, at = ms }.
+-- [project.id] = { kind = "worktrunk" | "git", tool = path?, at = ms }.
 -- Rechecked at most once a minute, or on demand through M.forget.
 local backends = {}
 local BACKEND_TTL_MS = 60000
@@ -92,34 +94,21 @@ end
 
 local function detect(project, done)
 	local cached = backends[project.id]
-	if cached and tern.now() - cached.at < BACKEND_TTL_MS then
-		tern.timer(0, function(cx) done(cached, cx) end)
-		return
+	if not cached or tern.now() - cached.at >= BACKEND_TTL_MS then
+		cached = plain_backend()
+		cached.at = tern.now()
+		backends[project.id] = cached
 	end
-	local function settle(backend, cx)
-		backend.at = tern.now()
-		backends[project.id] = backend
-		done(backend, cx)
-	end
-	local orca = orca_cli()
-	if not orca then
-		tern.timer(0, function(cx) settle(plain_backend(), cx) end)
-		return
-	end
-	run({ orca, "repo", "show", "--repo", "path:" .. project.path, "--json" }, function(result, _err, cx)
-		local ok, value = false, nil
-		if result and result.status == 0 then ok, value = pcall(tern.json.decode, result.stdout) end
-		if ok and type(value) == "table" and value.ok == true then
-			settle({ kind = "orca", tool = orca }, cx)
-		else
-			settle(plain_backend(), cx)
-		end
-	end)
+	tern.timer(0, function(cx) done(cached, cx) end)
 end
 
 function M.orca_available()
 	return orca_cli() ~= nil
 end
+
+-- Setup and archive scripts from Orca's settings, by repository path, as the
+-- last orca_repos answer gave them. orca.yaml in the checkout takes precedence.
+local orca_hooks = {}
 
 -- Repositories registered in Orca. done({ { name, path } }, err, cx)
 function M.orca_repos(done)
@@ -138,6 +127,13 @@ function M.orca_repos(done)
 		for _, row in rows do
 			if type(row) == "table" and row.kind == "git" and type(row.path) == "string" then
 				table.insert(repos, { name = if type(row.displayName) == "string" then row.displayName else row.path, path = row.path })
+				local scripts = type(row.hookSettings) == "table" and row.hookSettings.scripts
+				if type(scripts) == "table" then
+					orca_hooks[row.path] = {
+						setup = if type(scripts.setup) == "string" then scripts.setup else "",
+						archive = if type(scripts.archive) == "string" then scripts.archive else "",
+					}
+				end
 			end
 		end
 		done(repos, nil, cx)
@@ -202,6 +198,15 @@ function M.orca_script(root, name)
 		index += 1
 	end
 	return ""
+end
+
+-- The setup or archive script a plain-Git project runs: orca.yaml's in `root`,
+-- else the one Orca's settings give the repository at `repo`.
+function M.hook_script(repo, root, name)
+	local script = M.orca_script(root, name)
+	if script ~= "" then return script end
+	local hooks = orca_hooks[repo]
+	return hooks and hooks[name] or ""
 end
 
 local function primary_checkout(porcelain)
@@ -598,6 +603,11 @@ local function list_git(project, done)
 	end)
 end
 
+-- Ticket links Forge keeps, by branch: `git config branch.<branch>.forge-ticket`
+-- (a Linear id such as ENG-123, or an issue URL). Repository-local, never pushed,
+-- and settable by anyone with Git, agents included.
+local TICKET_KEY = "forge-ticket"
+
 local function linear_url(issue, workspace)
 	if type(issue) ~= "string" or issue == "" then return nil end
 	if string.match(issue, "^https://") then return issue end
@@ -621,15 +631,17 @@ local function overlay_orca(orca, project, trees, done)
 			for _, tree in trees do
 				local row = byPath[tree.path]
 				if row then
-					local linear = if type(row.linkedLinearIssue) == "string" then row.linkedLinearIssue else nil
+					local linear = if type(row.linkedLinearIssue) == "string" and row.linkedLinearIssue ~= "" then row.linkedLinearIssue else nil
+					-- Orca's link is copied into Forge's own store once; from then on Forge's copy wins.
+					if linear and tree.branch and not tree.ticket_link then
+						local url = linear_url(linear, row.linkedLinearIssueOrganizationUrlKey)
+						tree.ticket_link = url or linear
+						git(project.path, { "config", "branch." .. tree.branch .. "." .. TICKET_KEY, tree.ticket_link }, function() end)
+					end
 					tree.orca = {
 						name = if row.displayNameMode == "fixed" and type(row.displayName) == "string" then row.displayName else nil,
 						comment = if type(row.comment) == "string" and row.comment ~= "" then row.comment else nil,
 						status = if type(row.workspaceStatus) == "string" then row.workspaceStatus else nil,
-						linear = linear and {
-							id = string.match(linear, "(%u[%u%d]*%-%d+)") or linear,
-							url = linear_url(linear, row.linkedLinearIssueOrganizationUrlKey),
-						},
 					}
 				end
 			end
@@ -638,19 +650,60 @@ local function overlay_orca(orca, project, trees, done)
 	end)
 end
 
-function M.list(project, done)
-	detect(project, function(backend, cx)
-		if backend.kind == "worktrunk" then
-			list_worktrunk(backend.tool, project, done)
-			return
-		end
-		list_git(project, function(trees, err, nextCx)
-			if trees and backend.kind == "orca" then
-				overlay_orca(backend.tool, project, trees, done)
-			else
-				done(trees, err, nextCx)
+local function read_tickets(project, done)
+	git(project.path, { "config", "--get-regexp", "^branch\\..*\\." .. TICKET_KEY .. "$" }, function(result, _err, cx)
+		local tickets = {}
+		-- Exit 1 means none are set.
+		if result and result.status == 0 then
+			for line in string.gmatch(result.stdout, "[^\n]+") do
+				-- `-` is a pattern quantifier, so the key is matched escaped.
+				local branch, value = string.match(line, "^branch%.(.+)%.forge%-ticket (.+)$")
+				if branch and value then tickets[branch] = value end
 			end
-		end)
+		end
+		done(tickets, cx)
+	end)
+end
+
+-- Links `branch` to `ticket` (nil or "" clears it). done(ok, err, cx)
+function M.set_ticket(project, branch, ticket, done)
+	if type(branch) ~= "string" or branch == "" then
+		deferred_error(done, "This worktree has no branch to link.")
+		return
+	end
+	local key = "branch." .. branch .. "." .. TICKET_KEY
+	local args = if ticket and ticket ~= "" then { "config", key, ticket } else { "config", "--unset", key }
+	git(project.path, args, function(result, err, cx)
+		-- --unset exits 5 when nothing was set: already clear.
+		if result and (result.status == 0 or (result.status == 5 and not (ticket and ticket ~= ""))) then
+			done(true, nil, cx)
+		else
+			done(false, err or command_error("Cannot save the ticket link", result), cx)
+		end
+	end)
+end
+
+function M.list(project, done)
+	detect(project, function(backend, _cx)
+		local function finish(trees, err, cx)
+			if not trees then done(trees, err, cx); return end
+			read_tickets(project, function(tickets, ticketCx)
+				for _, tree in trees do
+					tree.ticket_link = tree.branch and tickets[tree.branch] or nil
+				end
+				local orca = orca_cli()
+				if orca then
+					overlay_orca(orca, project, trees, done)
+				else
+					done(trees, nil, ticketCx)
+				end
+			end)
+		end
+		if backend.kind == "worktrunk" then
+			list_worktrunk(backend.tool, project, finish)
+		else
+			list_git(project, finish)
+		end
 	end)
 end
 
@@ -736,9 +789,9 @@ end
 -- A sentence for the New worktree form about what happens besides `git worktree add`.
 function M.creation_note(project)
 	local kind = M.backend(project)
-	if kind == "orca" then return "Orca creates it, names its branch from this one, and runs its setup." end
 	if kind == "worktrunk" then return "Worktrunk hooks will run." end
 	if M.orca_script(project.path, "setup") ~= "" then return "The orca.yaml setup script will run." end
+	if M.hook_script(project.path, project.path, "setup") ~= "" then return "Orca's setup script for this repository will run." end
 	return ""
 end
 
@@ -748,9 +801,6 @@ local function operation_command(mode, project, target, option, receipt, hook)
 		error("The operation receipt must have an absolute path", 0)
 	end
 	local backend = backends[project.id] or plain_backend()
-	if backend.kind == "orca" and not backend.tool then
-		error("Orca's CLI was not found. Refresh Projects.", 0)
-	end
 	local args = {
 		tern.plugin.dir .. "/worktree-operation.sh", mode, backend.kind, backend.tool or "",
 		project.path, target, option, receipt, hook or "",
@@ -772,13 +822,13 @@ local function operation_command(mode, project, target, option, receipt, hook)
 end
 
 -- Git creates the worktree beside the primary checkout, as Worktrunk's default
--- template does, and runs orca.yaml's setup script there; Worktrunk and Orca
--- use their own layout and hooks.
+-- template does, and runs the setup script there (orca.yaml's, else Orca's
+-- settings'); Worktrunk uses its own layout and hooks.
 function M.creation_command(project, branch, receipt)
 	local invalid = branch_error(branch)
 	if invalid then error(invalid, 0) end
 	local backend = backends[project.id] or plain_backend()
-	local hook = if backend.kind == "git" then M.orca_script(project.path, "setup") else ""
+	local hook = if backend.kind == "git" then M.hook_script(project.path, project.path, "setup") else ""
 	return operation_command("create", project, branch, project.base, receipt, hook)
 end
 
@@ -787,7 +837,7 @@ function M.removal_command(project, worktree, receipt)
 		error("The primary checkout cannot be deleted.", 0)
 	end
 	local backend = backends[project.id] or plain_backend()
-	local hook = if backend.kind == "git" then M.orca_script(worktree.path, "archive") else ""
+	local hook = if backend.kind == "git" then M.hook_script(project.path, worktree.path, "archive") else ""
 	return operation_command("remove", project, worktree.path, worktree.branch or "", receipt, hook)
 end
 

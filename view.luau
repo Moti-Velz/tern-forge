@@ -115,6 +115,7 @@ local function worktreeNode(worktree, activePath)
 	if not worktree.deleting then
 		-- Menu entries show their action string verbatim, so actions are titled.
 		if worktree.pr then table.insert(menu, "Visualize PR") end
+		if worktree.branch then table.insert(menu, "Link ticket") end
 		table.insert(menu, "Rename")
 		if not worktree.is_main then
 			table.insert(menu, if worktree.iced then "Remove from Ice Box" else "Add to Ice Box")
