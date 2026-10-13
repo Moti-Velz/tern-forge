@@ -434,3 +434,21 @@
 [data-role='forge.dangerButton']:hover {
   background: color-mix(in srgb, var(--bad) 10%, transparent);
 }
+[data-role='forge.suggestions'] {
+  gap: 2px;
+  margin: 6px 0 4px;
+}
+[data-role='forge.suggestion'],
+[data-role='forge.suggestionOn'] {
+  padding: 4px 8px;
+  border-radius: 4px;
+  text-align: left;
+  gap: 1px;
+}
+[data-role='forge.suggestionOn'] {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+[data-role='forge.suggestionMeta'] {
+  opacity: 0.6;
+  font-size: 0.9em;
+}

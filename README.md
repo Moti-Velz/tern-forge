@@ -96,7 +96,7 @@ On Linux, use the `tern` binary from your Tern install in place of the macOS pat
 1. **Show Projects:** <kbd>⌘</kbd><kbd>⌥</kbd><kbd>⇧</kbd><kbd>P</kbd>, or **Show or hide Projects** in the command palette. Press it again while the panel has focus to hide it.
 2. **Add a repo:** **+** in the header opens the folder picker. With Orca installed, every repository registered in Orca is added on its own when Tern starts and on ↻. **Add project from Orca** in the command palette lists the ones not in Projects yet.
 3. **Open a worktree:** click its row. Its session opens, and the panel comes with it.
-4. **New worktree:** **+** next to a project. Type a branch name (and, if you like, a friendly display name). The form says what will run: Worktrunk hooks, the `orca.yaml` setup script, Orca's setup script for that repository, or nothing. Creation runs in the background, and a notification tells you when it's ready.
+4. **Open or create a worktree:** **+** next to a project, or **Super+Alt+Shift+O** from any of its worktrees, opens one box (Orca's model). Type a branch, a ticket (`ENG-123` or a Linear link) or a pull request (`#42` or a GitHub link). Worktrees it names, in any project, are listed as you type, straight from Forge's cache with no network calls; ↑↓ and Enter open one. Enter on the first row resolves what you typed: an existing worktree opens; a PR is checked out from its head branch (forks too, via `refs/pull/<n>/head`); a ticket gets branch `feature/<ID>`, linked to the ticket; a branch that exists locally or on origin is checked out; anything else becomes a new branch from the base. The form says what setup will run: Worktrunk hooks, the `orca.yaml` setup script, Orca's setup script for that repository, or nothing. New worktrees are made in a background tab and open when ready.
 5. **Everything else is a right-click away:**
 
 <img src="docs/images/context-menu.png" alt="Right-click menu on a worktree" width="420">
@@ -203,7 +203,7 @@ This section is for coding agents (and humans) changing Forge. It favors complet
 
 Forge is a Tern plugin written in Luau. `plugin.toml` declares two entry points:
 
-- `host.luau` runs in Tern's host and renders the `forge.form` block, the native form used for New worktree, Rename, Change base branch and Set Linear workspace. `input.luau` is its Unicode-aware text editing.
+- `host.luau` runs in Tern's host and renders the `forge.form` block, the native form used for Open worktree, Rename, Change base branch and Set Linear workspace. `input.luau` is its Unicode-aware text editing.
 - `window.luau` runs once per Tern window. It owns the Projects panel (a canvas that follows you between tabs), event hooks, the background job tracker, the Carly export, and Visualize PR canvases.
 
 Tern APIs are typed in the definitions Tern generates: `/Applications/Tern.app/Contents/MacOS/tern plugin types <dir>` writes `tern.d.luau`. Read it before using an API you haven't used here.

@@ -11,12 +11,13 @@ mode=$1
 backend=$2   # worktrunk or git
 tool=$3      # wt; empty for git
 repo=$4
-target=$5    # create: the new branch; remove: the worktree path
-option=$6    # create: the base branch; remove: the worktree's branch
+target=$5    # create: the new branch; checkout: an existing branch; remove: the worktree path
+option=$6    # create: the base branch; checkout: the PR number its branch comes from, or empty; remove: the worktree's branch
 receipt=$7
-hook=$8      # git only: the setup (create) or archive (remove) script, from orca.yaml or Orca's settings
+hook=$8      # git only: the setup (create, checkout) or archive (remove) script, from orca.yaml or Orca's settings
 case "$mode" in
     create) label='Worktree creation' ;;
+    checkout) label='Worktree checkout' ;;
     remove) label='Worktree removal' ;;
     *) printf 'Unknown operation: %s\n' "$mode" >&2; exit 64 ;;
 esac
@@ -115,6 +116,40 @@ create_worktree() {
     esac
 }
 
+# A worktree for a branch that already exists, locally, on origin, or as a pull
+# request's head (which also covers PRs from forks). Nothing in the primary
+# checkout changes: the branch is only fetched into refs/heads when missing.
+checkout_worktree() {
+    if ! git -C "$repo" show-ref --verify --quiet "refs/heads/$target"; then
+        if [ -n "$option" ]; then
+            printf 'Fetching pull request #%s into %s\n' "$option" "$target"
+            git -C "$repo" fetch origin "pull/$option/head:refs/heads/$target" || return
+        else
+            printf 'Fetching %s from origin\n' "$target"
+            git -C "$repo" fetch origin "refs/heads/$target:refs/heads/$target" || return
+        fi
+        # Track origin's branch when there is one (a fork's PR has none).
+        if git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$target" ||
+            git -C "$repo" fetch --quiet origin "refs/heads/$target:refs/remotes/origin/$target" 2>/dev/null; then
+            git -C "$repo" branch --quiet --set-upstream-to="origin/$target" "$target" 2>/dev/null || true
+        fi
+    fi
+    case "$backend" in
+        worktrunk)
+            "$tool" -C "$repo" switch --no-cd "$target"
+            ;;
+        git)
+            local path="${repo%/}.${target//\//-}"
+            if [ -e "$path" ]; then
+                printf 'Refusing checkout: %s already exists.\n' "$path" >&2
+                return 1
+            fi
+            git -C "$repo" worktree add -- "$path" "$target" || return
+            run_orca_hook setup "$path"
+            ;;
+    esac
+}
+
 remove_worktree() {
     # Recheck identity and cleanliness immediately before handing off.
     # Use an absolute path, not a branch shortcut that could target another tree.
@@ -159,11 +194,11 @@ remove_worktree() {
 
 # No pipeline, backgrounding, --yes or --no-hooks: project/user hooks see the
 # original terminal and retain approval prompts.
-if [ "$mode" = create ]; then
-    create_worktree
-else
-    remove_worktree
-fi
+case "$mode" in
+    create) create_worktree ;;
+    checkout) checkout_worktree ;;
+    remove) remove_worktree ;;
+esac
 status=$?
 record_status "$status"
 printf '\n%s command completed; review output above\n' "$label"

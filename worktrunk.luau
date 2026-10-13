@@ -842,6 +842,51 @@ function M.creation_command(project, branch, receipt)
 	return operation_command("create", project, branch, project.base, receipt, hook)
 end
 
+-- A worktree for a branch that already exists: local, on origin, or a PR's head
+-- (`pr` is its number, fetched as refs/pull/<n>/head when the branch is missing).
+function M.checkout_command(project, branch, pr, receipt)
+	local invalid = branch_error(branch)
+	if invalid then error(invalid, 0) end
+	local backend = backends[project.id] or plain_backend()
+	local hook = if backend.kind == "git" then M.hook_script(project.path, project.path, "setup") else ""
+	return operation_command("checkout", project, branch, if pr then tostring(pr) else "", receipt, hook)
+end
+
+-- Where `branch` exists: "local", "remote" (on origin), or nil. Checks origin over the
+-- network (`git ls-remote`) only when there's no local or remote-tracking ref.
+function M.branch_location(project, branch, done)
+	git(project.path, { "show-ref", "--verify", "--quiet", "refs/heads/" .. branch }, function(localRef, err, cx)
+		if not localRef then done(nil, err, cx); return end
+		if localRef.status == 0 then done("local", nil, cx); return end
+		git(project.path, { "show-ref", "--verify", "--quiet", "refs/remotes/origin/" .. branch }, function(tracking, _err, tcx)
+			if tracking and tracking.status == 0 then done("remote", nil, tcx); return end
+			git(project.path, { "ls-remote", "--exit-code", "--heads", "origin", branch }, function(remote, _rerr, rcx)
+				done(if remote and remote.status == 0 then "remote" else nil, nil, rcx)
+			end)
+		end)
+	end)
+end
+
+-- One pull request of the project's GitHub repository by number: its head branch
+-- and title. done({ number, branch, title, url, state }, err, cx)
+function M.pull_request_head(project, number, done)
+	local gh = find_executable("gh")
+	if not gh then
+		deferred_error(done, "GitHub CLI (gh) was not found")
+		return
+	end
+	run({ gh, "pr", "view", tostring(number), "--json", "number,headRefName,title,url,state" }, function(result, err, cx)
+		if not result then done(nil, err, cx); return end
+		if result.status ~= 0 then done(nil, command_error("Pull request #" .. tostring(number) .. " not found", result), cx); return end
+		local ok, value = pcall(decode_output, result.stdout)
+		if not ok or type(value) ~= "table" or type(value.headRefName) ~= "string" then
+			done(nil, "GitHub returned an unexpected response", cx)
+			return
+		end
+		done({ number = value.number, branch = value.headRefName, title = value.title, url = value.url, state = value.state }, nil, cx)
+	end, project.path)
+end
+
 function M.removal_command(project, worktree, receipt)
 	if worktree.is_main or worktree.path == project.path then
 		error("The primary checkout cannot be deleted.", 0)

@@ -291,7 +291,7 @@ function View.render(model)
 					"collapse=" .. project.id, (if collapsed then "Expand " else "Collapse ") .. project.name .. "\n" .. project.path,
 					"forge.projectToggle"),
 				text("count", tostring(project.total), "forge.count"),
-				button("create", "+", "create=" .. project.id, "New worktree from " .. project.base, "forge.iconButton"),
+				button("create", "+", "create=" .. project.id, "Open or create a worktree: branch, ticket or PR (Super+Alt+Shift+O)", "forge.iconButton"),
 				ui.node("row", { key = "spacer", grow = 1 }, {}),
 			}),
 		}

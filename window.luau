@@ -433,6 +433,105 @@ local function refreshByHand(cx)
 	end)
 end
 
+-- ── Worktree links ──────────────────────────────────────────────────────────────
+-- The same store the panel and `forge-links` (bin/) use: each worktree, the ticket
+-- linked to its branch (git config branch.<branch>.forge-ticket) and the branch's PR,
+-- looked up by any key on hand. Used by the Open box and Carly's exports.
+
+local function linkRows()
+	local out = {}
+	for _, project in projects() do
+		local entry = cache[project.id]
+		for _, tree in (entry and entry.worktrees or {}) do
+			local ticket = ticketFor(project, tree)
+			local pr = tree.branch and entry.prs and entry.prs[tree.branch] or nil
+			table.insert(out, {
+				project = project.name, repo = project.path, worktree = tree.path,
+				branch = tree.branch, primary = tree.is_main == true,
+				ticket = ticket and { id = ticket.id, url = ticket.url, link = tree.ticket_link },
+				pr = pr and { number = pr.number, state = pr.state, url = pr.url },
+			})
+		end
+	end
+	return out
+end
+
+-- Rows a key names: a PR URL or number (42, #42), a worktree path (or a path inside
+-- one; the innermost worktree wins), a Linear id or URL (linked first, else a branch
+-- naming it), else a branch name.
+local function matchRows(rows, key)
+	key = key:match("^%s*(.-)%s*$")
+	local found = {}
+	local repoPart, prNumber = string.match(key, "github%.com/([^/]+/[^/]+)/pull/(%d+)")
+	local number = tonumber(prNumber or string.match(key, "^#?(%d+)$"))
+	if number then
+		for _, row in rows do
+			if row.pr and row.pr.number == number
+				and (not repoPart or string.find(string.lower(row.pr.url or ""), string.lower(repoPart), 1, true)) then
+				table.insert(found, row)
+			end
+		end
+		return found
+	end
+	if string.sub(key, 1, 1) == "/" or string.sub(key, 1, 1) == "~" then
+		local path = if string.sub(key, 1, 1) == "~" then (tern.getenv("HOME") or "") .. string.sub(key, 2) else key
+		path = path:gsub("/+$", "")
+		local best
+		for _, row in rows do
+			if (path == row.worktree or string.sub(path, 1, #row.worktree + 1) == row.worktree .. "/")
+				and (not best or #row.worktree > #best.worktree) then
+				best = row
+			end
+		end
+		return if best then { best } else {}
+	end
+	local upper = string.upper(key)
+	local ticket = if string.find(key, "linear.app", 1, true) then string.match(upper, "(%u[%u%d]*%-%d+)")
+		else string.match(upper, "^(%u[%u%d]*%-%d+)$")
+	if ticket then
+		for _, row in rows do
+			if row.ticket and row.ticket.id == ticket and row.ticket.link then table.insert(found, row) end
+		end
+		if #found > 0 then return found end
+		for _, row in rows do
+			if row.branch and ticketOf(row.branch) == ticket then table.insert(found, row) end
+		end
+		return found
+	end
+	for _, row in rows do
+		if row.branch == key then table.insert(found, row) end
+	end
+	return found
+end
+
+-- Export arguments come first, then cx and the call; optional ones may be absent.
+local function exportArgs(...)
+	local args = table.pack(...)
+	return { table.unpack(args, 1, args.n - 2) }, args[args.n - 1], args[args.n]
+end
+
+-- Runs `done` once the cache is at most 15 s old (the panel's own cadence) and
+-- pull requests have settled. The panel refreshes only while it's open, so a
+-- question can arrive with nothing listed yet.
+local function whenFresh(cx, done)
+	local deadline = tern.now() + 10000
+	local function settled(c)
+		for _, entry in cache do
+			if entry.loading or entry.prLoading then
+				if tern.now() < deadline then
+					tern.timer(200, function(next) settled(next or c) end)
+					return
+				end
+				break
+			end
+		end
+		done(c)
+	end
+	-- One turn first: PR listings start right after a worktree listing finishes.
+	local function after(c) tern.timer(50, function(next) settled(next or c) end) end
+	if tern.now() - lastRefresh < 15000 then after(cx) else refresh(cx, function(doneCx) after(doneCx or cx) end) end
+end
+
 -- Tern panes belong to one tab, so the window's one Projects panel follows you:
 -- whenever another tab is shown, it moves there, full height on the left.
 -- It is a sidebar: its width is in columns, so it stays narrow on wide screens.
@@ -859,6 +958,29 @@ end
 
 -- Forms take the Projects panel's place, like a page within it, and follow you
 -- the same way; finishing or going back puts the panel back.
+-- What the Open box suggests from as you type: every worktree, with its display
+-- name, ticket and PR, those in `project` first.
+local function openCandidates(project)
+	local names = records("worktree-names")
+	local here, others = {}, {}
+	for _, p in projects() do
+		local entry = cache[p.id]
+		local isHere = project ~= nil and p.id == project.id
+		for _, tree in (entry and entry.worktrees or {}) do
+			local ticket = ticketFor(p, tree)
+			local pr = tree.branch and entry.prs and entry.prs[tree.branch] or nil
+			table.insert(if isHere then here else others, {
+				path = tree.path, project = p.name, here = isHere,
+				branch = tree.branch, primary = tree.is_main == true,
+				name = names[p.id] and names[p.id][tree.path] or tree.orca and tree.orca.name,
+				ticket = ticket and ticket.id, pr = pr and pr.number, prState = pr and pr.state,
+			})
+		end
+	end
+	table.move(others, 1, #others, #here + 1, here)
+	return tern.json.array(here)
+end
+
 local function openForm(cx, mode, project, worktree)
 	if not requireLocal(cx) then return end
 	if worktree and removing(worktree.path) then report(cx, "This worktree is being deleted."); return end
@@ -878,6 +1000,7 @@ local function openForm(cx, mode, project, worktree)
 	end
 	local names = worktree and records("worktree-names")[project.id]
 	local id = token()
+	if mode == "open" then tern.kv.set("form-data:" .. id, openCandidates(project)) end
 	local pane = swapSlot(cx, current, function()
 		return cx:new_block("forge.form", {
 			id, mode,
@@ -885,7 +1008,7 @@ local function openForm(cx, mode, project, worktree)
 			if worktree then names and names[worktree.path] or ""
 				elseif mode == "linear" then project.linear or ""
 				else project and project.base or "",
-			if mode == "create" and project then wt.creation_note(project) else "",
+			if mode == "open" and project then wt.creation_note(project) else "",
 		}, "beside")
 	end)
 	if not pane then report(cx, "Reload the Forge plugin.", "Form unavailable"); return end
@@ -1132,6 +1255,9 @@ end
 
 -- Starts the backend's creation of `job.branch` in a background tab and records
 -- `job` for checkJobs. Returns an error message instead when it cannot start.
+-- Creates a worktree in a background tab: a new branch from the base, or, with
+-- `job.checkout`, a branch that already exists (locally, on origin, or PR `job.pr`).
+-- `job.open` opens the worktree's session once it's ready.
 local function launchCreation(cx, project, job)
 	for _, other in records("jobs") do
 		if other.project == project.id and other.branch == job.branch then
@@ -1140,13 +1266,18 @@ local function launchCreation(cx, project, job)
 	end
 	local id = token()
 	local receipt = tern.plugin.data .. "/creation-" .. id .. ".status"
-	local ready, command = pcall(wt.creation_command, project, job.branch, receipt)
+	local ready, command
+	if job.checkout then
+		ready, command = pcall(wt.checkout_command, project, job.branch, job.pr, receipt)
+	else
+		ready, command = pcall(wt.creation_command, project, job.branch, receipt)
+	end
 	if not ready then return command end
 	-- A background tab: the panel stays in front while setup runs.
 	local terminal = cx.layout:new_tab({ cwd = project.path, command = command }, { focus = false })
 	if not terminal then return "Could not open the creation terminal." end
 	local tab = cx.session:tab_of(terminal)
-	if tab then cx.layout:name_tab(tab, "Create: " .. job.branch) end
+	if tab then cx.layout:name_tab(tab, (if job.checkout then "Checkout: " else "Create: ") .. job.branch) end
 	job.kind, job.project, job.receipt, job.pane, job.started = "create", project.id, receipt, terminal, os.time()
 	local jobs = records("jobs")
 	jobs[id] = job
@@ -1154,20 +1285,99 @@ local function launchCreation(cx, project, job)
 	return nil
 end
 
-local function createWorktree(cx, pane, request, response)
+-- The Open box: a picked worktree opens; typed text is resolved, in order, as a
+-- worktree already there (by path, branch, ticket or PR), a pull request (#42 or
+-- its URL: checked out from GitHub), a ticket (ENG-123 or a Linear URL: branch
+-- feature/ENG-123, linked), or a branch name (checked out if it exists locally or
+-- on origin, else created from the base). New worktrees open once they're ready.
+local function startOpenJob(cx, pane, project, spec)
+	local launchError = launchCreation(cx, project, {
+		branch = spec.branch, displayName = spec.displayName, open = true,
+		checkout = spec.checkout, pr = spec.pr,
+	})
+	if launchError then rejectForm(cx, pane, launchError); return end
+	if spec.ticket then
+		wt.set_ticket(project, spec.branch, spec.ticket, function(ok, err)
+			if not ok then tern.log.warn("Ticket link not saved for " .. spec.branch .. ": " .. tostring(err)) end
+		end)
+	end
+	finishForm(cx, pane)
+	cx:toast("info", if spec.checkout then "Checking out worktree" else "Creating worktree",
+		notificationLabel(spec.displayName or spec.branch))
+	redraw(cx)
+end
+
+local function openExisting(cx, pane, path)
+	finishForm(cx, pane)
+	openWorktree(cx, path)
+end
+
+local function openFromForm(cx, pane, request, response)
+	tern.kv.set("form-data:" .. request.token, nil)
+	if type(response.path) == "string" then openExisting(cx, pane, response.path); return end
 	local project = projectById(request.project)
 	if not project then rejectForm(cx, pane, "Project is no longer registered."); return end
+	local query = (if type(response.query) == "string" then response.query else ""):match("^%s*(.-)%s*$")
+	if query == "" then rejectForm(cx, pane, "Enter a branch, ticket or pull request."); return end
 	local displayName, nameError = normalizeName(response.name)
 	if nameError then rejectForm(cx, pane, nameError); return end
-	wt.validate(project, response.branch, function(ok, err, nextCx)
+
+	local rows = linkRows()
+	-- The worktree the key names in this project. Links (a PR or Linear URL) and
+	-- ticket ids name one thing anywhere; a bare number or branch only here.
+	local global = string.match(query, "^https?://") ~= nil or string.match(string.upper(query), "^%u[%u%d]*%-%d+$") ~= nil
+	local function existing(hits)
+		local here = {}
+		for _, row in hits do
+			if row.repo == project.path then table.insert(here, row) end
+		end
+		if #here == 1 then return here[1] end
+		return if #here == 0 and global and #hits == 1 then hits[1] else nil
+	end
+	local found = existing(matchRows(rows, query))
+	if found then openExisting(cx, pane, found.worktree); return end
+
+	local function onBranch(branch)
+		for _, row in rows do
+			if row.repo == project.path and row.branch == branch then return row end
+		end
+		return nil
+	end
+
+	local prNumber = tonumber(string.match(query, "github%.com/[^/]+/[^/]+/pull/(%d+)") or string.match(query, "^#?(%d+)$"))
+	if prNumber then
+		wt.pull_request_head(project, prNumber, function(pr, err, nextCx)
+			if not nextCx then return end
+			if not pr then rejectForm(nextCx, pane, err); return end
+			local row = onBranch(pr.branch)
+			if row then openExisting(nextCx, pane, row.worktree); return end
+			startOpenJob(nextCx, pane, project, {
+				branch = pr.branch, checkout = true, pr = pr.number,
+				displayName = displayName or pr.title,
+			})
+		end)
+		return
+	end
+
+	local upper = string.upper(query)
+	local ticket = if string.find(query, "linear.app", 1, true) then string.match(upper, "(%u[%u%d]*%-%d+)")
+		else string.match(upper, "^(%u[%u%d]*%-%d+)$")
+	local branch = if ticket then "feature/" .. ticket else query
+	local link = if ticket then (if string.match(query, "^https?://") then query else ticket) else nil
+	local row = onBranch(branch)
+	if row then openExisting(cx, pane, row.worktree); return end
+	wt.branch_location(project, branch, function(where, _err, nextCx)
 		if not nextCx then return end
 		if not nextCx.session:pane(pane) then finishForm(nextCx, pane); return end
-		if not ok then rejectForm(nextCx, pane, err); return end
-		local launchError = launchCreation(nextCx, project, { branch = response.branch, displayName = displayName })
-		if launchError then rejectForm(nextCx, pane, launchError); return end
-		finishForm(nextCx, pane)
-		nextCx:toast("info", "Creating worktree", notificationLabel(displayName or response.branch))
-		redraw(nextCx)
+		if where then
+			startOpenJob(nextCx, pane, project, { branch = branch, checkout = true, displayName = displayName, ticket = link })
+			return
+		end
+		wt.validate(project, branch, function(ok, err, validCx)
+			if not validCx then return end
+			if not ok then rejectForm(validCx, pane, err); return end
+			startOpenJob(validCx, pane, project, { branch = branch, displayName = displayName, ticket = link })
+		end)
 	end)
 end
 
@@ -1288,6 +1498,21 @@ local function startTicketAgent(job)
 	end)
 end
 
+-- A worktree made from the Open box opens once it exists (ticket worktrees already
+-- open their session for the agent).
+local function openCreated(job)
+	local project = projectById(job.project)
+	if job.agentPrompt or not project then return end
+	wt.list(project, function(trees, err, cx)
+		if not cx then return end
+		if not trees then report(cx, err, "Worktree not opened"); return end
+		local tree = createdTree(job, trees)
+		if not tree then report(cx, "No worktree for " .. job.branch .. " after creation.", "Worktree not opened"); return end
+		ensureSession(cx, project, tree.path, tree.branch)
+		redraw(cx)
+	end)
+end
+
 local function forms(cx)
 	for _, pane in cx.session:panes() do
 		if pane.block == "forge.form" and not inflight[pane.pane] then
@@ -1303,8 +1528,8 @@ local function forms(cx)
 					inflight[pane.pane] = true
 					if response.cancelled then
 						finishForm(cx, pane.pane)
-					elseif request.mode == "create" and response.mode == "create" then
-						createWorktree(cx, pane.pane, request, response)
+					elseif request.mode == "open" and response.mode == "open" then
+						openFromForm(cx, pane.pane, request, response)
 					elseif request.mode == "rename" and response.mode == "rename" then
 						renameWorktree(cx, pane.pane, request, response)
 					elseif request.mode == "base" and response.mode == "base" then
@@ -1415,6 +1640,7 @@ local function checkJobs(cx)
 				if status == 0 then
 					cx:toast("info", "Worktree created", notificationLabel(label))
 					startTicketAgent(job)
+					if job.open then openCreated(job) end
 				else
 					cx:toast("error", "Worktree creation failed", "Check the Create tab for details.")
 				end
@@ -1434,9 +1660,9 @@ tern.command({
 	available = function() return wt.orca_available() end,
 	run = function(cx) pickOrcaProject(cx) end,
 })
-tern.command({ id = "create", title = "Create worktree", icon = "branch", run = function(cx)
+tern.command({ id = "create", title = "Open or create worktree (branch, ticket or PR)", icon = "branch", keys = { "cmd+alt+shift+o" }, run = function(cx)
 	local project = activeWorktree(cx)
-	if project then openForm(cx, "create", project) else navigator(cx); cx:toast("info", "Choose a project", "Click + beside a project's name.") end
+	if project then openForm(cx, "open", project) else navigator(cx); cx:toast("info", "Choose a project", "Click + beside a project's name.") end
 end })
 
 local TICKET_PROMPT = "Please read ticket %s to understand your task and ask any questions you have before we start"
@@ -1498,105 +1724,6 @@ tern.carly.export("ticket_worktree", {
 	end)
 	return call:wait(30000)
 end)
-
--- ── Worktree links for Carly ───────────────────────────────────────────────────
--- The same store the panel and `forge-links` (bin/) use: each worktree, the ticket
--- linked to its branch (git config branch.<branch>.forge-ticket) and the branch's PR,
--- looked up by any key on hand. Answered from the panel's cache, refreshed every 15 s.
-
-local function linkRows()
-	local out = {}
-	for _, project in projects() do
-		local entry = cache[project.id]
-		for _, tree in (entry and entry.worktrees or {}) do
-			local ticket = ticketFor(project, tree)
-			local pr = tree.branch and entry.prs and entry.prs[tree.branch] or nil
-			table.insert(out, {
-				project = project.name, repo = project.path, worktree = tree.path,
-				branch = tree.branch, primary = tree.is_main == true,
-				ticket = ticket and { id = ticket.id, url = ticket.url, link = tree.ticket_link },
-				pr = pr and { number = pr.number, state = pr.state, url = pr.url },
-			})
-		end
-	end
-	return out
-end
-
--- Rows a key names: a PR URL or number (42, #42), a worktree path (or a path inside
--- one; the innermost worktree wins), a Linear id or URL (linked first, else a branch
--- naming it), else a branch name.
-local function matchRows(rows, key)
-	key = key:match("^%s*(.-)%s*$")
-	local found = {}
-	local repoPart, prNumber = string.match(key, "github%.com/([^/]+/[^/]+)/pull/(%d+)")
-	local number = tonumber(prNumber or string.match(key, "^#?(%d+)$"))
-	if number then
-		for _, row in rows do
-			if row.pr and row.pr.number == number
-				and (not repoPart or string.find(string.lower(row.pr.url or ""), string.lower(repoPart), 1, true)) then
-				table.insert(found, row)
-			end
-		end
-		return found
-	end
-	if string.sub(key, 1, 1) == "/" or string.sub(key, 1, 1) == "~" then
-		local path = if string.sub(key, 1, 1) == "~" then (tern.getenv("HOME") or "") .. string.sub(key, 2) else key
-		path = path:gsub("/+$", "")
-		local best
-		for _, row in rows do
-			if (path == row.worktree or string.sub(path, 1, #row.worktree + 1) == row.worktree .. "/")
-				and (not best or #row.worktree > #best.worktree) then
-				best = row
-			end
-		end
-		return if best then { best } else {}
-	end
-	local upper = string.upper(key)
-	local ticket = if string.find(key, "linear.app", 1, true) then string.match(upper, "(%u[%u%d]*%-%d+)")
-		else string.match(upper, "^(%u[%u%d]*%-%d+)$")
-	if ticket then
-		for _, row in rows do
-			if row.ticket and row.ticket.id == ticket and row.ticket.link then table.insert(found, row) end
-		end
-		if #found > 0 then return found end
-		for _, row in rows do
-			if row.branch and ticketOf(row.branch) == ticket then table.insert(found, row) end
-		end
-		return found
-	end
-	for _, row in rows do
-		if row.branch == key then table.insert(found, row) end
-	end
-	return found
-end
-
--- Export arguments come first, then cx and the call; optional ones may be absent.
-local function exportArgs(...)
-	local args = table.pack(...)
-	return { table.unpack(args, 1, args.n - 2) }, args[args.n - 1], args[args.n]
-end
-
--- Runs `done` once the cache is at most 15 s old (the panel's own cadence) and
--- pull requests have settled. The panel refreshes only while it's open, so a
--- question can arrive with nothing listed yet.
-local function whenFresh(cx, done)
-	local deadline = tern.now() + 10000
-	local function settled(c)
-		for _, entry in cache do
-			if entry.loading or entry.prLoading then
-				if tern.now() < deadline then
-					tern.timer(200, function(next) settled(next or c) end)
-					return
-				end
-				break
-			end
-		end
-		done(c)
-	end
-	-- One turn first: PR listings start right after a worktree listing finishes.
-	local function after(c) tern.timer(50, function(next) settled(next or c) end) end
-	if tern.now() - lastRefresh < 15000 then after(cx) else refresh(cx, function(doneCx) after(doneCx or cx) end) end
-end
 
 tern.carly.export("worktrees", {
 	sig = "(key: string?) -> {{project: string, repo: string, worktree: string, branch: string?, primary: boolean, ticket: {id: string, url: string?, link: string?}?, pr: {number: number, state: string, url: string}?}}",
@@ -1667,7 +1794,7 @@ tern.on("canvas_action", function(ev, cx)
 	elseif ev.act == "collapse" then collapsed[ev.value] = not collapsed[ev.value]; redraw(cx)
 	elseif ev.act == "create" then
 		local project = projectById(ev.value)
-		if project then openForm(cx, "create", project) end
+		if project then openForm(cx, "open", project) end
 	elseif ev.act == "open" then openWorktree(cx, ev.value)
 	elseif ev.act == "Add to Ice Box" or ev.act == "Remove from Ice Box" then
 		-- Menu entries show their action verbatim, so these read as titled.

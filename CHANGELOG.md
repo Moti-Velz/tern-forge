@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.2.0 (2026-10-13)
+
+### Changed
+
+- **One box opens or creates a worktree, from a branch, a ticket or a pull request.** **+** beside a project (or **Super+Alt+Shift+O** in a worktree) replaces the New worktree form with Orca's model: type a branch, `ENG-123` or a Linear link, or `#42` or a GitHub PR link. Matching worktrees from every project are listed as you type, from Forge's cache with no network calls, and ↑↓ Enter opens one. Enter on what you typed opens the worktree it names, else checks out the PR's head branch (forks too), a ticket's `feature/<ID>` branch (linked to the ticket) or a branch that exists locally or on origin, else creates a new branch from the base. New worktrees open once they're ready.
+
 ## 3.1.0 (2026-10-12)
 
 ### Changed

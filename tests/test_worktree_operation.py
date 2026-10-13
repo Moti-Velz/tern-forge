@@ -239,6 +239,59 @@ class GitOperationTests(OperationFixture, RemovalSafety, unittest.TestCase):
         self.assertEqual((occupied / "keep.txt").read_text(), "not ours\n")
         self.assertNotIn("refs/heads/taken", self.git("for-each-ref", "refs/heads/"))
 
+    def origin(self):
+        """A bare origin for the repository, as `git clone --bare` makes it."""
+        origin = self.root / "origin.git"
+        self.git("clone", "--bare", "--quiet", str(self.repo), str(origin))
+        self.git("remote", "add", "origin", str(origin))
+        return origin
+
+    def test_checkout_opens_an_existing_local_branch(self):
+        self.git("branch", "feature/local")
+        result = self.operation("checkout", "feature/local", "")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        path = self.root / "repo space é's.feature-local"
+        self.assertEqual(self.git("branch", "--show-current", cwd=path), "feature/local")
+        self.assertEqual(self.git("branch", "--show-current"), "master")
+
+    def test_checkout_fetches_a_branch_only_on_origin_and_tracks_it(self):
+        origin = self.origin()
+        self.git("checkout", "-q", "-b", "feature/remote")
+        (self.repo / "remote.txt").write_text("from origin\n")
+        self.git("add", "remote.txt")
+        self.git("commit", "-q", "-m", "remote work")
+        self.git("push", "-q", "origin", "feature/remote")
+        self.git("checkout", "-q", "master")
+        self.git("branch", "-D", "feature/remote")
+        result = self.operation("checkout", "feature/remote", "")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        path = self.root / "repo space é's.feature-remote"
+        self.assertEqual((path / "remote.txt").read_text(), "from origin\n")
+        self.assertEqual(self.git("rev-parse", "--abbrev-ref", "feature/remote@{upstream}"), "origin/feature/remote")
+
+    def test_checkout_fetches_a_pull_request_head(self):
+        origin = self.origin()
+        # A PR from a fork: GitHub publishes its head only as refs/pull/<n>/head.
+        self.git("checkout", "-q", "-b", "fork-work")
+        (self.repo / "fork.txt").write_text("from a fork\n")
+        self.git("add", "fork.txt")
+        self.git("commit", "-q", "-m", "fork work")
+        self.git("push", "-q", "origin", "fork-work:refs/pull/7/head")
+        self.git("checkout", "-q", "master")
+        self.git("branch", "-D", "fork-work")
+        result = self.operation("checkout", "contributor/fix", "7")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        path = self.root / "repo space é's.contributor-fix"
+        self.assertEqual((path / "fork.txt").read_text(), "from a fork\n")
+        self.assertEqual(self.git("branch", "--show-current"), "master")
+
+    def test_checkout_of_a_missing_branch_fails_without_a_worktree(self):
+        self.origin()
+        result = self.operation("checkout", "feature/nowhere", "")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "repo space é's.feature-nowhere").exists())
+        self.assertNotIn("refs/heads/feature/nowhere", self.git("for-each-ref", "refs/heads/"))
+
     def test_setup_script_runs_in_the_new_worktree_with_orca_environment(self):
         marker = self.root / "setup-env"
         result = self.operation("create", "with-setup", "master", self.RECORD_ENV + '"' + str(marker) + '"')
