@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.1.0 (2026-10-12)
+
+### Changed
+
+- **Orca projects appear on their own.** Every repository registered in Orca joins Projects when Tern starts (or Forge reloads) and on ↻. Nothing is asked, and one toast names what was added. Projects only grows: a repository already listed is left as it is. **Add project from Orca** is still in the palette.
+- **The Projects panel is a sidebar.** It opens 40 columns wide instead of 30% of the tab, which was over 1000 px on wide screens. The width you drag it to is remembered in columns (`panel-columns`, 20–120), and a panel left open from an older version is narrowed once when Forge loads.
+
 ## 3.0.0 (2026-10-12)
 
 The plugin is now called Forge, and it adds subscription usage. This release is breaking: it has a new id, new action names and a new data directory.

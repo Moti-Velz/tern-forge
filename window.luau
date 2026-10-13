@@ -401,6 +401,8 @@ end
 -- ↻ spins from an explicit refresh until its worktree listings finish, and
 -- for at least one turn so a fast refresh is still visible.
 local SPIN_MIN_MS = 800
+-- Defined with the Orca picker below: adds the repositories registered in Orca.
+local syncOrca
 
 local function refreshByHand(cx)
 	if spinning then return end
@@ -411,6 +413,7 @@ local function refreshByHand(cx)
 	if linearDefault == false then linearDefault = nil end
 	-- Orca may have been started or a repository registered there since.
 	for _, project in projects() do wt.forget(project) end
+	syncOrca(cx)
 	refresh(cx, function(doneCx)
 		local function stop(stopCx)
 			spinning = false
@@ -423,9 +426,12 @@ end
 
 -- Tern panes belong to one tab, so the window's one Projects panel follows you:
 -- whenever another tab is shown, it moves there, full height on the left.
-local DEFAULT_SHARE = 0.3
--- The width you leave it at travels with it (a share of the tab).
-local share = tonumber(tern.kv.get("panel-share")) or DEFAULT_SHARE
+-- It is a sidebar: its width is in columns, so it stays narrow on wide screens.
+local DEFAULT_COLUMNS = 40
+-- The width you leave it at travels with it.
+local columns = tonumber(tern.kv.get("panel-columns")) or DEFAULT_COLUMNS
+-- Whether this load has given the panel its width yet (see pin).
+local sized = false
 -- Whether you want the panel shown; it reopens after vanishing with its tab.
 local wantPanel = tern.kv.get("panel-open") == true
 -- The tab the panel was last placed in, to tell a closed panel from a closed tab.
@@ -445,13 +451,27 @@ local function leftShare(cx, tab, pane)
 	return nil
 end
 
+-- The tab's width in columns, measured: Tern only reports split ratios, so nudge
+-- the panel by one column and back, and read how far its ratio moved.
+local function tabColumns(cx, tab, pane)
+	local before = leftShare(cx, tab, pane)
+	if not before or not cx.layout:resize(pane, "right", 1) then return nil end
+	local after = leftShare(cx, tab, pane)
+	cx.layout:resize(pane, "right", -1)
+	if not after or after == before then return nil end
+	return 1 / math.abs(after - before)
+end
+
 -- Tern resizes in cells, and a hidden tab's cells differ from the shown one's,
 -- so steer by the ratio: step, see how far it moved, correct.
-local function sizeTo(cx, tab, pane, want)
+local function sizeTo(cx, tab, pane, wantColumns)
+	local total = tabColumns(cx, tab, pane)
+	if not total then return end
+	local want = math.clamp(wantColumns / total, 0.1, 0.6)
 	local r = leftShare(cx, tab, pane)
-	local step = if r then math.floor((want - r) * 180 + 0.5) else 0
+	local step = if r then math.floor((want - r) * total + 0.5) else 0
 	for _ = 1, 8 do
-		if not r or math.abs(r - want) < 0.005 or step == 0 then return end
+		if not r or math.abs(r - want) < 0.5 / total or step == 0 then return end
 		cx.layout:resize(pane, "right", step)
 		local after = leftShare(cx, tab, pane)
 		if not after or after == r then return end
@@ -468,16 +488,27 @@ local function pin(cx, tab)
 	if not layout then return end
 	local from = cx.session:tab_of(pane)
 	if from == tab and firstLeaf(layout.root) == pane then
+		-- A panel placed before this load (an older, wider one included) gets the
+		-- sidebar width once; after that its width is yours to drag.
+		if not sized then
+			sizeTo(cx, tab, pane, columns)
+			sized = true
+		end
 		panelTab = tab
 		return
 	end
 	local target = firstLeaf(layout.root, pane)
 	if not target then return end
-	if from then
+	if from and sized then
+		-- You dragged it wider or narrower: remember that width, in columns.
 		local current = leftShare(cx, from, pane)
-		if current and math.abs(current - share) > 0.01 then
-			share = math.clamp(current, 0.15, 0.6)
-			tern.kv.set("panel-share", share)
+		local total = current and tabColumns(cx, from, pane)
+		if current and total then
+			local now = math.floor(current * total + 0.5)
+			if math.abs(now - columns) > 1 then
+				columns = math.clamp(now, 20, 120)
+				tern.kv.set("panel-columns", columns)
+			end
 		end
 	end
 	if from ~= tab then
@@ -488,7 +519,8 @@ local function pin(cx, tab)
 		end
 	end
 	cx.layout:move(pane, target, "left", { focus = false })
-	sizeTo(cx, tab, pane, share)
+	sizeTo(cx, tab, pane, columns)
+	sized = true
 	panelTab = tab
 end
 
@@ -1028,6 +1060,56 @@ local function pickOrcaProject(cx)
 	end)
 end
 
+-- Repositories registered in Orca join Projects on their own, when Tern starts and
+-- on ↻; nothing is asked. Projects only grows: one already listed stays as it is.
+local syncingOrca = false
+function syncOrca(cx)
+	if syncingOrca or not wt.orca_available() or not localHost(cx) then return end
+	syncingOrca = true
+	wt.orca_repos(function(repos, err, nextCx)
+		if not repos or not nextCx then
+			syncingOrca = false
+			if err then tern.log.info("Orca projects not synced: " .. tostring(err)) end
+			return
+		end
+		local known = {}
+		for _, project in projects() do known[project.path] = true end
+		local paths = {}
+		for _, repo in repos do
+			if not known[repo.path] then table.insert(paths, repo.path) end
+		end
+		local added = {}
+		local function step(i, stepCx)
+			if i > #paths then
+				syncingOrca = false
+				if #added > 0 then
+					stepCx:toast("info", if #added == 1 then "Project added from Orca" else "Added " .. #added .. " projects from Orca",
+						notificationLabel(table.concat(added, ", ")))
+					refresh(stepCx)
+				end
+				return
+			end
+			wt.inspect(paths[i], function(project, _inspectErr, inspectCx)
+				-- A repository without a checked-out branch has no base to work from; skip it.
+				if project and project.base ~= "" then
+					local all = projects()
+					local listed = false
+					for _, existing in all do
+						if existing.id == project.id or existing.path == project.path then listed = true end
+					end
+					if not listed then
+						table.insert(all, project)
+						tern.kv.set("projects", all)
+						table.insert(added, project.name)
+					end
+				end
+				step(i + 1, inspectCx or stepCx)
+			end)
+		end
+		step(1, nextCx)
+	end)
+end
+
 -- Display names are single-line labels for the Projects panel; blank means
 -- "use the branch name".
 local function normalizeName(raw)
@@ -1538,6 +1620,11 @@ end
 tern.on("window_start", function(cx)
 	refresh(cx)
 	follow(cx)
+	syncOrca(cx)
+end)
+-- A plugin reload in a running window gets no window_start; pick up Orca then too.
+tern.timer(0, function(cx)
+	if cx then syncOrca(cx) end
 end)
 -- Every tab, pane and focus change moves the panel into the shown tab and
 -- draws it; any one of these hooks keeps it following if another is disabled.

@@ -93,7 +93,7 @@ On Linux, use the `tern` binary from your Tern install in place of the macOS pat
 ## Use it
 
 1. **Show Projects:** <kbd>⌘</kbd><kbd>⌥</kbd><kbd>⇧</kbd><kbd>P</kbd>, or **Show or hide Projects** in the command palette. Press it again while the panel has focus to hide it.
-2. **Add a repo:** **+** in the header opens the folder picker. With Orca installed, **Add project from Orca** in the command palette lists Orca's registered repositories that aren't in Projects yet.
+2. **Add a repo:** **+** in the header opens the folder picker. With Orca installed, every repository registered in Orca is added on its own when Tern starts and on ↻. **Add project from Orca** in the command palette lists the ones not in Projects yet.
 3. **Open a worktree:** click its row. Its session opens, and the panel comes with it.
 4. **New worktree:** **+** next to a project. Type a branch name (and, if you like, a friendly display name). The form says what will run: Orca's setup, Worktrunk hooks, the `orca.yaml` setup script, or nothing. Creation runs in the background, and a notification tells you when it's ready.
 5. **Everything else is a right-click away:**
