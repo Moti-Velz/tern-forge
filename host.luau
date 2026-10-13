@@ -1,11 +1,12 @@
 --!strict
--- Block `granola.meetings`: the Granola panel as a focusable block driven by the keyboard (and the
+-- Block `<plugin>.meetings`: the meetings panel as a focusable block driven by the keyboard (and the
 -- mouse). It owns the UI state: selection, gathered meetings, list or details screen, filter. The window half owns
--- what only a window can do (the API key in the keychain, Granola requests, pasting into an agent,
--- focus), so the block asks it through `tern-granola://VERB?…` links (`cx:open` → `route.link`) and
--- gets answers back as `granola` action events (`cx.session:event`).
+-- what only a window can do (credentials, requests to the meeting sources, pasting into an agent,
+-- focus), so the block asks it through `tern-<plugin>://VERB?…` links (`cx:open` → `route.link`,
+-- lib/link.luau) and gets answers back as `meetings` action events (`cx.session:event`).
 
 local context = require("./lib/context")
+local link = require("./lib/link")
 local view = require("./lib/view")
 
 type State = view.State & { cx: BlockCx }
@@ -15,13 +16,14 @@ local function utc_offset(): number
 	return now - os.time(os.date("!*t", now) :: any)
 end
 
--- Asks the window half for something; `params` values are ids, numbers or flags.
+-- Asks the window half for something; `params` values are already in wire form (`link.encode`,
+-- `link.ids`, numbers or flags).
 local function request(cx: BlockCx, verb: string, params: { [string]: string }?)
-	local parts: { string } = { "pane=" .. tostring(cx.pane) }
+	local p: { [string]: string } = { pane = tostring(cx.pane) }
 	for k, v in params or {} do
-		table.insert(parts, k .. "=" .. v)
+		p[k] = v
 	end
-	cx:open("tern-granola://" .. verb .. "?" .. table.concat(parts, "&"))
+	cx:open(link.make(verb, p))
 end
 
 local function visible(s: State): { any }
@@ -41,7 +43,7 @@ local function want_detail(s: State)
 	local note = selected(s)
 	if s.detail and note and s.details[note.id] == nil and s.detail_errors[note.id] == nil then
 		s.detail_errors[note.id] = nil
-		request(s.cx, "detail", { id = note.id })
+		request(s.cx, "detail", { id = link.encode(note.id) })
 	end
 end
 
@@ -66,7 +68,7 @@ local function toggle_pick(s: State, id: string)
 	else
 		table.insert(s.picked, id)
 	end
-	request(s.cx, "picked", { ids = table.concat(s.picked, ",") })
+	request(s.cx, "picked", { ids = link.ids(s.picked) })
 end
 
 -- Saved state comes back as decoded JSON, whose arrays are read-only; gathered ids live in a plain
@@ -98,13 +100,13 @@ local function attach(s: State)
 		return
 	end
 	s.busy = "Adding to the agent…"
-	request(s.cx, "attach", { ids = table.concat(ids, ","), transcript = if s.transcript then "1" else "0" })
+	request(s.cx, "attach", { ids = link.ids(ids), transcript = if s.transcript then "1" else "0" })
 end
 
 local function copy(s: State)
 	local ids = targets(s)
 	if #ids > 0 then
-		request(s.cx, "copy", { ids = table.concat(ids, ","), transcript = if s.transcript then "1" else "0" })
+		request(s.cx, "copy", { ids = link.ids(ids), transcript = if s.transcript then "1" else "0" })
 	end
 end
 
@@ -194,7 +196,7 @@ local function on_key(s: State, k: Key, _cx: BlockCx): boolean?
 	elseif name == "o" then
 		local note = selected(s)
 		if note then
-			request(s.cx, "web", { id = note.id })
+			request(s.cx, "web", { id = link.encode(note.id) })
 		end
 		return false
 	elseif name == "x" then
@@ -230,6 +232,7 @@ local function on_answer(s: State, kind: string, data: any)
 			s.notes = data.notes
 		end
 		s.more = data.more == true
+		s.sources = if type(data.sources) == "table" then data.sources else {}
 		s.loading = data.loading == true
 		s.error = data.error
 		s.sel = math.clamp(s.sel, 1, math.max(1, #visible(s)))
@@ -251,7 +254,7 @@ local function on_answer(s: State, kind: string, data: any)
 end
 
 local function on_event(s: State, ev: UiEvent, cx: BlockCx)
-	if ev.act == "granola" then
+	if ev.act == "meetings" then
 		local ok, data = pcall(tern.json.decode, ev.data or "null")
 		if ok and type(data) == "table" then
 			on_answer(s, ev.kind, data)
@@ -281,7 +284,7 @@ local function on_event(s: State, ev: UiEvent, cx: BlockCx)
 	elseif ev.act == "web" then
 		local note = selected(s)
 		if note then
-			request(cx, "web", { id = note.id })
+			request(cx, "web", { id = link.encode(note.id) })
 		end
 	elseif ev.act == "attach" then
 		attach(s)
@@ -318,6 +321,7 @@ tern.block.define("meetings", {
 			transcript = tern.kv.get("transcript") == true,
 			busy = nil,
 			help = false,
+			sources = {},
 			now = os.time(),
 			offset = utc_offset(),
 		}
@@ -329,14 +333,14 @@ tern.block.define("meetings", {
 				return
 			end
 			tries += 1
-			request(cx, "hello", { ids = table.concat(s.picked, ",") })
+			request(cx, "hello", { ids = link.ids(s.picked) })
 			tern.timer(500, hello)
 		end
 		tern.timer(0, hello)
 		return s
 	end,
 	title = function(_s: State): string?
-		return "Granola"
+		return "Meetings"
 	end,
 	view = function(s: State, cx: BlockCx): BlockView
 		s.now = os.time()

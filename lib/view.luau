@@ -1,5 +1,5 @@
 --!strict
--- The Granola block's view: the meeting list (the selection is the keyboard cursor) or one meeting's
+-- The meetings block's view: the meeting list (the selection is the keyboard cursor) or one meeting's
 -- details screen, and a footer with the gathered count, the mode and the keys. Pure: state in, nodes
 -- out.
 
@@ -24,6 +24,8 @@ export type State = {
 	transcript: boolean,
 	busy: string?,
 	help: boolean,
+	-- Display names of the connected sources.
+	sources: { string },
 	now: number,
 	offset: number,
 }
@@ -91,6 +93,10 @@ local function detail_screen(s: State, note: any, pos: number, total: number, pi
 	local id: string = note.id
 	local detail = s.details[id]
 	local meta = context.when(note.created_at, s.now, s.offset)
+	local from = context.SOURCES[note.source or ""]
+	if from then
+		meta ..= " · " .. from
+	end
 	if detail and type(detail.folder_membership) == "table" and #detail.folder_membership > 0 then
 		meta ..= " · " .. (detail.folder_membership[1].name or "")
 	end
@@ -100,7 +106,7 @@ local function detail_screen(s: State, note: any, pos: number, total: number, pi
 			text("pos", string.format("%d of %d", pos, total), "granola.muted", { grow = 1 }),
 			if picked then text("picked", "✓ gathered", "granola.count") else text("picked", "", "granola.muted"),
 		}),
-		text("title", context.title(note), "granola.detailTitle"),
+		text("title", context.title(detail or note), "granola.detailTitle"),
 		text("meta", meta, "granola.muted"),
 	}
 	local who = attendees(detail, 12)
@@ -112,7 +118,8 @@ local function detail_screen(s: State, note: any, pos: number, total: number, pi
 			if picked then "Remove from the gathered meetings (space)" else "Gather this meeting (space)"),
 		button("attach", "Add to agent", "attach", "Add to the agent (⏎)", "granola.primary"),
 		button("copy", "Copy", "copy", "Copy as Markdown (c)"),
-		button("web", "Open in Granola", "web", "Open in Granola (o)"),
+		button("web", if note.source == "local" then "Open file" else "Open in " .. (from or "source"), "web",
+			"Open where it lives (o)"),
 	}))
 	local body: { Node } = {}
 	if s.detail_errors[id] then
@@ -123,6 +130,11 @@ local function detail_screen(s: State, note: any, pos: number, total: number, pi
 		local summary = detail.summary_markdown or detail.summary_text
 		if type(summary) == "string" and string.find(summary, "%S") then
 			table.insert(body, ui.md(summary))
+		elseif type(detail.transcript) == "table" and #detail.transcript > 0 then
+			-- Captions and dialogue files: the start of the transcript stands in for a summary.
+			local lines = table.move(detail.transcript, 1, math.min(40, #detail.transcript), 1, {})
+			table.insert(body, ui.md(context.transcript(lines)
+				.. (if #detail.transcript > 40 then string.format("\n\n*… %d more lines*", #detail.transcript - 40) else "")))
 		else
 			table.insert(body, text("nosummary", "No summary.", "granola.muted"))
 		end
@@ -137,12 +149,12 @@ local LIST_KEYS = {
 }
 local DETAIL_KEYS = {
 	{ "←", "back" }, { "↑↓", "prev / next" }, { "space", "gather" }, { "⏎", "add to agent" },
-	{ "tab", "mode" }, { "c", "copy" }, { "o", "open in Granola" },
+	{ "tab", "mode" }, { "c", "copy" }, { "o", "open" },
 }
 local MORE_KEYS = {
 	{ "j k", "move" }, { "h l", "back / details" }, { "g G", "top / bottom" },
-	{ "c", "copy as Markdown" }, { "o", "open in Granola" }, { "x", "clear gathered" },
-	{ "r", "reload" }, { "K", "set API key" }, { "esc", "back / to the agent" },
+	{ "c", "copy as Markdown" }, { "o", "open in its app / file" }, { "x", "clear gathered" },
+	{ "r", "reload" }, { "K", "connect a source" }, { "esc", "back / to the agent" },
 }
 
 local function key_hints(list: { { string } }, key: string): Node
@@ -163,7 +175,7 @@ end
 
 function View.render(s: State, rows: number): BlockView
 	local header: { Node } = {
-		text("title", "Granola", "granola.heading", { grow = 1 }),
+		text("title", "Meetings", "granola.heading", { grow = 1 }),
 	}
 	if s.loading then
 		table.insert(header, text("loading", "loading…", "granola.muted"))
@@ -173,10 +185,10 @@ function View.render(s: State, rows: number): BlockView
 
 	if s.key == "missing" then
 		table.insert(main, ui.node("col", { key = "empty", role = "granola.empty" }, {
-			text("title", "Connect Granola", "granola.emptyTitle"),
-			text("help", "Create a personal API key in Granola under Settings › Connectors › API keys "
-				.. "(Business or Enterprise plan). It is kept in the system keychain.", "granola.muted"),
-			button("setkey", "Set API key (K)", "key", "Paste a Granola API key", "granola.primary"),
+			text("title", "Connect a meeting source", "granola.emptyTitle"),
+			text("help", "Granola or Fireflies with an API key (kept in the system keychain), or a folder of "
+				.. "exported notes and transcripts (.md, .txt, .vtt, .srt) from any recorder.", "granola.muted"),
+			button("setkey", "Connect (K)", "key", "Connect Granola, Fireflies or a local folder", "granola.primary"),
 		}))
 		return { main = ui.col(main) }
 	end
@@ -201,17 +213,26 @@ function View.render(s: State, rows: number): BlockView
 	elseif #shown == 0 then
 		table.insert(main, text("none",
 			if s.loading then "Loading meetings…"
-				elseif #s.notes == 0 then "No summarized meetings yet."
+				elseif #s.notes == 0 then "No meetings yet."
 				else "No meeting matches the filter.",
 			"granola.muted"))
 	else
 		local items: { any } = {}
 		for i, n in shown do
-			local detail = context.when(n.created_at, s.now, s.offset)
+			local parts: { string } = {}
+			local when = context.when(n.created_at, s.now, s.offset)
+			if when ~= "" then
+				table.insert(parts, when)
+			end
+			local from = context.SOURCES[n.source or ""]
+			if #s.sources > 1 and from then
+				table.insert(parts, from)
+			end
 			local who = attendees(s.details[n.id], 3)
 			if who then
-				detail ..= " · " .. who
+				table.insert(parts, who)
 			end
+			local detail = table.concat(parts, " · ")
 			table.insert(items, {
 				-- The cursor is spelled out: the list's own selection highlight is faint in some themes.
 				label = (if i == cur then "▸ " else "  ") .. context.title(n),

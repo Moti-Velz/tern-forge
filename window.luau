@@ -1,32 +1,56 @@
 --!strict
--- Window half: everything the Granola block (host.luau) can't do itself. It keeps the API key in the
--- keychain, talks to Granola, pastes meetings into the agent's composer and moves focus. The block
--- asks through `tern-granola://VERB?pane=N&…` links, claimed here by `route.link`; answers go back as
--- `granola` action events on the block's pane. Alt+G jumps to the block and back. Carly gets the
--- notes through the `recent` and `note` exports.
+-- Window half: everything the meetings block (host.luau) can't do itself. It keeps the sources'
+-- credentials (API keys in the keychain, the local folder in kv), talks to the sources, pastes
+-- meetings into the agent's composer and moves focus. The block asks through `tern-<id>://VERB?…`
+-- links (lib/link.luau), claimed here by `route.link`; answers go back as `meetings` action events on
+-- the block's pane. Alt+G jumps to the block and back. Carly gets the meetings through the `recent`
+-- and `note` exports.
 
-local api = require("./lib/api")
 local context = require("./lib/context")
+local link = require("./lib/link")
+local source = require("./lib/sources/source")
 
-local KIND = "granola.meetings"
-local SCHEME = "tern-granola://"
-local SECRET = "api-key"
+local SOURCES: { source.Def } = {
+	require("./lib/sources/granola"),
+	require("./lib/sources/fireflies"),
+	require("./lib/sources/local"),
+}
+local BY_ID: { [string]: source.Def } = {}
+for _, def in SOURCES do
+	BY_ID[def.id] = def
+end
 
-local api_key: string? = nil
+local KIND = tern.plugin.id .. ".meetings"
+local LOCAL_DIR = "local-dir"
+
+-- Each source's credential once read: the API key or the folder; nil when not connected.
+local creds: { [string]: string? } = {}
+local creds_read = false
 -- The pane the user last worked in outside the block: where Esc returns, a new agent's directory.
 local last_pane: number? = nil
 -- The agent block the user last worked in: where gathered meetings go.
 local last_agent: number? = nil
 
--- Meetings loaded so far (newest first), the next page's cursor, and fetched notes by id.
+-- Meetings loaded so far (newest first, all sources), each source's next-page cursor, and full
+-- meetings by id.
 local notes: { any } = {}
-local cursor: string? = nil
+local cursors: { [string]: string? } = {}
 local details: { [string]: any } = {}
 -- What the block has gathered, for Carly's context.
 local picked: { string } = {}
 
 local function trim(s: string): string
 	return (string.gsub(s, "^%s+", ""):gsub("%s+$", ""))
+end
+
+local function connected(): { source.Def }
+	local out: { source.Def } = {}
+	for _, def in SOURCES do
+		if creds[def.id] then
+			table.insert(out, def)
+		end
+	end
+	return out
 end
 
 local function block_pane(cx: WindowCx): number?
@@ -40,14 +64,28 @@ end
 
 -- Sends an answer to the block in `pane`; a closed block just misses it.
 local function answer(cx: WindowCx, pane: number, kind: string, data: any)
-	pcall(cx.session.event, cx.session, pane, { ev = "action", act = "granola", kind = kind, data = tern.json.encode(data) })
+	pcall(cx.session.event, cx.session, pane, { ev = "action", act = "meetings", kind = kind, data = tern.json.encode(data) })
+end
+
+local function any_cursor(): boolean
+	for _, c in cursors do
+		if c then
+			return true
+		end
+	end
+	return false
 end
 
 local function send_state(cx: WindowCx, pane: number, extra: { [string]: any }?)
+	local names: { string } = {}
+	for _, def in connected() do
+		table.insert(names, def.name)
+	end
 	local data: { [string]: any } = {
-		key = if api_key then "ok" else "missing",
+		key = if #names > 0 then "ok" else "missing",
+		sources = tern.json.array(names),
 		notes = tern.json.array(notes),
-		more = cursor ~= nil,
+		more = any_cursor(),
 		loading = false,
 	}
 	for k, v in extra or {} do
@@ -56,136 +94,216 @@ local function send_state(cx: WindowCx, pane: number, extra: { [string]: any }?)
 	answer(cx, pane, "state", data)
 end
 
--- ── API key ─────────────────────────────────────────────────────────────────
+-- ── Credentials ─────────────────────────────────────────────────────────────
 
-local function ask_key(cx: WindowCx, after: ((key: string, cx: WindowCx) -> ())?)
-	cx:prompt({ placeholder = "Granola API key (grn_…)", action = "save key", icon = "key" }):next(function(value, _err, cx2)
-		local wcx = cx2 :: WindowCx
-		if value == nil or trim(value) == "" then
+-- Reads every source's credential once (keychain reads are async), then runs `fn`.
+local function with_creds(cx: WindowCx, fn: (cx: WindowCx) -> ())
+	if creds_read then
+		fn(cx)
+		return
+	end
+	local dir = tern.kv.get(LOCAL_DIR)
+	creds["local"] = if type(dir) == "string" and dir ~= "" then dir else nil
+	local secrets: { source.Def } = {}
+	for _, def in SOURCES do
+		if def.credential == "secret" then
+			table.insert(secrets, def)
+		end
+	end
+	local function step(i: number, c: WindowCx)
+		if i > #secrets then
+			creds_read = true
+			fn(c)
 			return
 		end
-		local key = trim(value)
-		tern.secrets.set(SECRET, key):next(function(_r, err, cx3)
-			local c = (cx3 or wcx) :: WindowCx
+		local def = secrets[i]
+		tern.secrets.get(def.secret :: string):next(function(value, err, c2)
+			local wcx = (c2 or c) :: WindowCx
 			if err then
-				c:toast("error", "Couldn't store the Granola key", err)
-				return
+				wcx:toast("error", "Couldn't read the keychain", err)
 			end
-			api_key = key
-			c:toast("success", "Granola key saved")
-			if after then
-				after(key, c)
-			end
+			creds[def.id] = if type(value) == "string" and value ~= "" then value else nil
+			step(i + 1, wcx)
 		end)
+	end
+	step(1, cx)
+end
+
+local function store(cx: WindowCx, def: source.Def, value: string?, after: (cx: WindowCx) -> ())
+	creds[def.id] = value
+	cursors[def.id] = nil
+	if def.credential == "path" then
+		tern.kv.set(LOCAL_DIR, value)
+		after(cx)
+		return
+	end
+	tern.secrets.set(def.secret :: string, value):next(function(_r, err, c2)
+		local wcx = (c2 or cx) :: WindowCx
+		if err then
+			wcx:toast("error", "Couldn't store the " .. def.name .. " key", err)
+			return
+		end
+		after(wcx)
 	end)
 end
 
--- Runs `fn` with the API key, reading the keychain once; nil `key` means there is none.
-local function with_key(cx: WindowCx, fn: (key: string?, cx: WindowCx) -> ())
-	if api_key then
-		fn(api_key, cx)
-		return
-	end
-	tern.secrets.get(SECRET):next(function(value, err, cx2)
-		local c = (cx2 or cx) :: WindowCx
-		if err then
-			c:toast("error", "Couldn't read the keychain", err)
+-- Picks a source and asks for its key or folder; an empty answer disconnects a connected one.
+local function connect(cx: WindowCx, after: (cx: WindowCx) -> ())
+	with_creds(cx, function(c)
+		local items: { PickItem } = {}
+		for _, def in SOURCES do
+			local on = creds[def.id] ~= nil
+			table.insert(items, {
+				label = def.name,
+				detail = if on then (if def.credential == "path" then creds[def.id] else "connected")
+					else (if def.credential == "path" then "a folder of exports" else "API key"),
+				icon = if def.credential == "path" then "folder" else "key",
+				current = on,
+				source = def.id,
+			})
 		end
-		if type(value) == "string" and value ~= "" then
-			api_key = value
-		end
-		fn(api_key, c)
+		c:pick({ items = items, placeholder = "Connect a meeting source", icon = "key", action = "connect" }):next(function(item, _err, c2)
+			if item == nil then
+				return
+			end
+			local def = BY_ID[item.source]
+			local on = creds[def.id] ~= nil
+			local hint = def.prompt .. (if on then " (empty disconnects)" else "")
+			;(c2 :: WindowCx):prompt({
+				value = if def.credential == "path" then creds[def.id] else nil,
+				placeholder = hint, action = if def.credential == "path" then "use folder" else "save key",
+				icon = if def.credential == "path" then "folder" else "key",
+			}):next(function(value, _err2, c3)
+				local wcx = c3 :: WindowCx
+				if value == nil then
+					return
+				end
+				local v = trim(value)
+				if v == "" and not on then
+					return
+				end
+				store(wcx, def, if v == "" then nil else v, function(c4)
+					c4:toast("success", if v == "" then def.name .. " disconnected" else def.name .. " connected")
+					after(c4)
+				end)
+			end)
+		end)
 	end)
 end
 
 -- ── Requests ────────────────────────────────────────────────────────────────
 
-local function load(cx: WindowCx, pane: number, more: boolean)
-	with_key(cx, function(key, c)
-		if key == nil then
-			send_state(c, pane)
+-- Newest first by actual time (sources write timestamps with different offsets); undated last.
+local function by_date(a: any, b: any): boolean
+	return (context.epoch(a.created_at) or 0) > (context.epoch(b.created_at) or 0)
+end
+
+-- Lists the first page of every connected source (or, with `more`, the next page of each that has
+-- one) and merges them newest first; `done` gets the errors of the sources that failed.
+local function list_all(cx: WindowCx, more: boolean, done: (errs: { string }, cx: WindowCx) -> ())
+	with_creds(cx, function(c)
+		local todo: { source.Def } = {}
+		for _, def in connected() do
+			if not more or cursors[def.id] then
+				table.insert(todo, def)
+			end
+		end
+		if #todo == 0 then
+			if not more then
+				notes = {}
+			end
+			done({}, c)
 			return
 		end
-		api.list(key, if more then cursor else nil, function(page, err, c2)
-			if err or page == nil then
-				if err and string.find(err, "401") then
-					api_key = nil
+		local pending = #todo
+		local got: { any } = if more then notes else {}
+		local errs: { string } = {}
+		for _, def in todo do
+			def.list(creds[def.id] :: string, if more then cursors[def.id] else nil, function(page, err, c2)
+				if err or page == nil then
+					table.insert(errs, err or (def.name .. " returned nothing"))
+					cursors[def.id] = nil
+					-- A rejected key is forgotten for this session, so the block asks to connect again.
+					if err and string.find(err, "(401)", 1, true) then
+						creds[def.id] = nil
+					end
+				else
+					for _, n in page.notes do
+						table.insert(got, n)
+					end
+					cursors[def.id] = page.cursor
 				end
-				send_state(c2, pane, { error = err })
-				return
-			end
-			if more then
-				for _, n in page.notes do
-					table.insert(notes, n)
+				pending -= 1
+				if pending == 0 then
+					table.sort(got, by_date)
+					notes = got
+					done(errs, c2)
 				end
-			else
-				notes = page.notes
+			end)
+		end
+	end)
+end
+
+local function load(cx: WindowCx, pane: number, more: boolean)
+	list_all(cx, more, function(errs, c)
+		send_state(c, pane, { error = if #errs > 0 then table.concat(errs, " · ") else nil })
+	end)
+end
+
+-- One meeting in full from its source (cached unless a transcript is wanted and missing).
+local function fetch(cx: WindowCx, id: string, transcript: boolean, done: source.Done<any>)
+	local cached = details[id]
+	if cached and (not transcript or type(cached.transcript) == "table") then
+		done(cached, nil, cx)
+		return
+	end
+	with_creds(cx, function(c)
+		local src, native = source.split(id)
+		local def = BY_ID[src]
+		if def == nil or creds[src] == nil then
+			done(nil, (if def then def.name else src) .. " isn't connected", c)
+			return
+		end
+		def.note(creds[src] :: string, native, transcript, function(note, err, c2)
+			if note then
+				details[id] = note
 			end
-			cursor = page.cursor
-			send_state(c2, pane)
+			done(note, err, c2)
 		end)
 	end)
 end
 
 local function detail(cx: WindowCx, pane: number, id: string)
-	if details[id] then
-		answer(cx, pane, "detail", { id = id, note = details[id] })
-		return
-	end
-	with_key(cx, function(key, c)
-		if key == nil then
-			return
-		end
-		api.note(key, id, false, function(note, err, c2)
-			if err or note == nil then
-				answer(c2, pane, "detail", { id = id, error = err or "Granola returned nothing" })
-				return
-			end
-			details[id] = note
-			answer(c2, pane, "detail", { id = id, note = note })
-		end)
+	fetch(cx, id, false, function(note, err, c)
+		answer(c, pane, "detail", { id = id, note = note, error = if note then nil else (err or "Nothing came back") })
 	end)
 end
 
--- Fetches the notes `ids` (with transcripts when asked), one at a time to stay well under Granola's
--- rate limit, reusing what the details screen already loaded.
+-- Fetches the meetings `ids` (with transcripts when asked) one at a time, to stay well under the
+-- sources' rate limits.
 local function gather(cx: WindowCx, pane: number?, ids: { string }, transcript: boolean, done: (notes: { any }, cx: WindowCx) -> ())
-	with_key(cx, function(key, c)
-		if key == nil then
-			c:toast("error", "Granola has no API key yet")
+	local out: { any } = {}
+	local function step(i: number, sc: WindowCx)
+		if i > #ids then
+			done(out, sc)
 			return
 		end
-		local out: { any } = {}
-		local function step(i: number, sc: WindowCx)
-			if i > #ids then
-				done(out, sc)
-				return
-			end
-			local id = ids[i]
-			local cached = details[id]
-			if cached and (not transcript or type(cached.transcript) == "table") then
-				table.insert(out, cached)
-				step(i + 1, sc)
-				return
-			end
-			if pane and #ids > 1 then
-				answer(sc, pane, "busy", { text = string.format("Fetching %d of %d…", i, #ids) })
-			end
-			api.note(key, id, transcript, function(note, err, c2)
-				if err or note == nil then
-					if pane then
-						answer(c2, pane, "done", {})
-					end
-					c2:toast("error", "Granola", err or "Granola returned nothing")
-					return
-				end
-				details[id] = note
-				table.insert(out, note)
-				step(i + 1, c2)
-			end)
+		if pane and #ids > 1 then
+			answer(sc, pane, "busy", { text = string.format("Fetching %d of %d…", i, #ids) })
 		end
-		step(1, c)
-	end)
+		fetch(sc, ids[i], transcript, function(note, err, c2)
+			if note == nil then
+				if pane then
+					answer(c2, pane, "done", {})
+				end
+				c2:toast("error", "Meetings", err or "Nothing came back")
+				return
+			end
+			table.insert(out, note)
+			step(i + 1, c2)
+		end)
+	end
+	step(1, cx)
 end
 
 -- ── Delivery to agents ──────────────────────────────────────────────────────
@@ -289,23 +407,14 @@ local function copy(cx: WindowCx, ids: { string }, transcript: boolean)
 	end)
 end
 
+-- Opens the meeting where it lives: its web page, or the file for local meetings.
 local function open_web(cx: WindowCx, id: string)
-	if details[id] and details[id].web_url then
-		cx:open(details[id].web_url)
-		return
-	end
-	with_key(cx, function(key, c)
-		if key == nil then
+	fetch(cx, id, false, function(note, err, c)
+		if note == nil or type(note.web_url) ~= "string" then
+			c:toast("error", "Meetings", err or "This meeting has no link")
 			return
 		end
-		api.note(key, id, false, function(note, err, c2)
-			if err or note == nil or type(note.web_url) ~= "string" then
-				c2:toast("error", "Granola", err or "This note has no web link")
-				return
-			end
-			details[id] = note
-			c2:open(note.web_url)
-		end)
+		c:open(note.web_url)
 	end)
 end
 
@@ -331,47 +440,35 @@ local function go_back(cx: WindowCx)
 	end
 end
 
-local function split_ids(s: string?): { string }
-	local ids: { string } = {}
-	for id in string.gmatch(s or "", "[%w_]+") do
-		table.insert(ids, id)
-	end
-	return ids
-end
-
-tern.route.link(function(link: LinkRequest, cx: WindowCx): RouteDecision?
-	if string.sub(link.url, 1, #SCHEME) ~= SCHEME then
+tern.route.link(function(req: LinkRequest, cx: WindowCx): RouteDecision?
+	local verb, q = link.parse(req.url)
+	if verb == nil then
 		return nil
 	end
-	-- The scheme has a `-`, a pattern quantifier, so the verb is cut out by position.
-	local verb = string.match(string.sub(link.url, #SCHEME + 1), "^([%w-]+)") or ""
-	local q: { [string]: string } = {}
-	for k, v in string.gmatch(string.match(link.url, "%?(.*)$") or "", "([^&=]+)=([^&]*)") do
-		q[k] = v
-	end
-	local pane = tonumber(q.pane) or link.pane
+	local pane = tonumber(q.pane) or req.pane
 	local transcript = q.transcript == "1"
+	local id = if q.id then link.decode(q.id) else nil
 	if verb == "hello" then
-		picked = split_ids(q.ids)
-		if #notes > 0 and api_key then
+		picked = link.split(q.ids)
+		if #notes > 0 and creds_read then
 			send_state(cx, pane)
 		else
 			load(cx, pane, false)
 		end
 	elseif verb == "load" then
 		load(cx, pane, q.more == "1")
-	elseif verb == "detail" and q.id then
-		detail(cx, pane, q.id)
+	elseif verb == "detail" and id then
+		detail(cx, pane, id)
 	elseif verb == "attach" then
-		attach(cx, pane, split_ids(q.ids), transcript)
+		attach(cx, pane, link.split(q.ids), transcript)
 	elseif verb == "copy" then
-		copy(cx, split_ids(q.ids), transcript)
-	elseif verb == "web" and q.id then
-		open_web(cx, q.id)
+		copy(cx, link.split(q.ids), transcript)
+	elseif verb == "web" and id then
+		open_web(cx, id)
 	elseif verb == "picked" then
-		picked = split_ids(q.ids)
+		picked = link.split(q.ids)
 	elseif verb == "key" then
-		ask_key(cx, function(_key, c)
+		connect(cx, function(c)
 			load(c, pane, false)
 		end)
 	elseif verb == "back" then
@@ -397,18 +494,18 @@ end
 
 tern.command({
 	id = "meetings",
-	title = "Granola: Meetings (jump in and back)",
+	title = "Meetings: Jump in and back",
 	icon = "sparkle",
 	keys = { "alt+g" },
 	run = toggle,
 })
 
 tern.command({
-	id = "key",
-	title = "Granola: Set API key",
+	id = "connect",
+	title = "Meetings: Connect a source (Granola, Fireflies, local folder)",
 	icon = "key",
 	run = function(cx)
-		ask_key(cx, function(_key, c)
+		connect(cx, function(c)
 			local pane = block_pane(c)
 			if pane then
 				load(c, pane, false)
@@ -444,29 +541,27 @@ end)
 -- ── Carly ───────────────────────────────────────────────────────────────────
 
 -- Exports get their arguments first, then `cx` and the call handle.
-local function split_args(...: any): ({ any }, ExportCall)
+local function split_args(...: any): ({ any }, WindowCx, ExportCall)
 	local args = { ... }
-	local call = args[#args]
-	return { table.unpack(args, 1, #args - 2) }, call
+	return { table.unpack(args, 1, #args - 2) }, args[#args - 1], args[#args]
 end
 
 tern.carly.export("recent", {
-	sig = "recent() -> { { id: string, title: string, when: string } }",
-	doc = "Recent Granola meetings (newest first, up to 30) with note ids for note(id).",
+	sig = "recent() -> { { id: string, title: string, when: string, source: string } }",
+	doc = "Recent meetings from every connected source (Granola, Fireflies, local folder), newest first, with ids for note(id).",
 }, function(...)
-	local _, call = split_args(...)
-	if api_key == nil then
-		call:fail("No Granola API key: run “Granola: Set API key” from the palette.")
-		return nil
-	end
-	api.list(api_key, nil, function(page, err, _cx)
-		if err or page == nil then
-			call:fail(err or "Granola returned nothing")
+	local _, cx, call = split_args(...)
+	list_all(cx, false, function(errs, _c)
+		if #notes == 0 and #errs > 0 then
+			call:fail(table.concat(errs, " · "))
 			return
 		end
 		local out = {}
-		for _, n in page.notes do
-			table.insert(out, { id = n.id, title = context.title(n), when = n.created_at or "" })
+		for i, n in notes do
+			if i > 30 then
+				break
+			end
+			table.insert(out, { id = n.id, title = context.title(n), when = n.created_at or "", source = n.source })
 		end
 		call:reply(tern.json.array(out))
 	end)
@@ -475,21 +570,17 @@ end)
 
 tern.carly.export("note", {
 	sig = "note(id: string, transcript: boolean?) -> string",
-	doc = "One Granola meeting as Markdown: attendees, summary, my notes and, with transcript = true, the transcript.",
+	doc = "One meeting as Markdown: attendees, summary, notes and, with transcript = true, the transcript.",
 }, function(...)
-	local args, call = split_args(...)
+	local args, cx, call = split_args(...)
 	local id, transcript = args[1], args[2] == true
 	if type(id) ~= "string" then
-		call:fail("note(id): id is a Granola note id such as not_1d3tmYTlCICgjy (see recent()).")
+		call:fail("note(id): id is a meeting id from recent(), such as fireflies:abc123.")
 		return nil
 	end
-	if api_key == nil then
-		call:fail("No Granola API key: run “Granola: Set API key” from the palette.")
-		return nil
-	end
-	api.note(api_key, id, transcript, function(note, err, _cx)
-		if err or note == nil then
-			call:fail(err or "Granola returned nothing")
+	fetch(cx, id, transcript, function(note, err, _c)
+		if note == nil then
+			call:fail(err or "Nothing came back")
 			return
 		end
 		call:reply(context.note(note, { transcript = transcript }))
@@ -510,5 +601,5 @@ tern.carly.context(function(_cx)
 			end
 		end
 	end
-	return if #titles > 0 then "Granola meetings gathered in the panel: " .. table.concat(titles, "; ") else nil
+	return if #titles > 0 then "Meetings gathered in the panel: " .. table.concat(titles, "; ") else nil
 end)

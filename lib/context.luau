@@ -9,6 +9,7 @@ export type Speaker = { source: string?, attribution: string?, diarization_label
 export type Line = { speaker: Speaker?, text: string, start_time: string? }
 export type Note = {
 	id: string,
+	source: string?,
 	title: string?,
 	owner: User?,
 	created_at: string?,
@@ -154,6 +155,9 @@ local function nest(md: string, top: number): string
 	end)):sub(2)
 end
 
+-- Display names of the meeting sources.
+Context.SOURCES = { granola = "Granola", fireflies = "Fireflies", ["local"] = "Local file" }
+
 -- One note as a Markdown section headed `## title`.
 function Context.note(note: Note, opts: { transcript: boolean }): string
 	local out: { string } = { "## " .. Context.title(note), "" }
@@ -183,10 +187,13 @@ function Context.note(note: Note, opts: { transcript: boolean }): string
 			table.insert(meta, "- Folders: " .. table.concat(names, ", "))
 		end
 	end
+	local from = Context.SOURCES[note.source or "granola"] or note.source or "?"
 	if note.web_url then
-		table.insert(meta, "- Granola: " .. note.web_url)
+		table.insert(meta, "- Source: " .. from .. " — " .. note.web_url)
+	else
+		table.insert(meta, "- Source: " .. from)
 	end
-	table.insert(meta, "- Note id: " .. note.id)
+	table.insert(meta, "- Meeting id: " .. note.id)
 	table.insert(out, table.concat(meta, "\n"))
 	local summary = note.summary_markdown or note.summary_text
 	if summary and string.find(summary, "%S") then
@@ -202,7 +209,9 @@ function Context.note(note: Note, opts: { transcript: boolean }): string
 		table.insert(out, "")
 		table.insert(out, nest(mine, 4))
 	end
-	if opts.transcript and note.transcript and #note.transcript > 0 then
+	-- Captions and dialogue files have no summary; their transcript is all there is, so it always goes.
+	local has_summary = (summary and string.find(summary, "%S")) or (mine and string.find(mine, "%S"))
+	if (opts.transcript or not has_summary) and note.transcript and #note.transcript > 0 then
 		table.insert(out, "")
 		table.insert(out, "### Transcript")
 		table.insert(out, "")
@@ -211,14 +220,29 @@ function Context.note(note: Note, opts: { transcript: boolean }): string
 	return table.concat(out, "\n")
 end
 
+-- `a`, `a and b`, `a, b and c`.
+local function joined(items: { string }): string
+	if #items <= 1 then
+		return items[1] or ""
+	end
+	return table.concat(items, ", ", 1, #items - 1) .. " and " .. items[#items]
+end
+
 -- The whole context document for several notes, oldest meeting first so the story reads in order.
 function Context.document(notes: { Note }, opts: { transcript: boolean }): string
 	local sorted = table.clone(notes)
 	table.sort(sorted, function(a, b)
 		return (Context.epoch(a.created_at) or 0) < (Context.epoch(b.created_at) or 0)
 	end)
+	local froms: { string } = {}
+	for _, n in sorted do
+		local name = if n.source == "local" then "local files" else Context.SOURCES[n.source or "granola"] or n.source
+		if name and not table.find(froms, name) then
+			table.insert(froms, name)
+		end
+	end
 	local parts: { string } = {
-		"# Meeting context from Granola",
+		"# Meeting context" .. (if #froms > 0 then " from " .. joined(froms) else ""),
 		"",
 		if #sorted == 1 then "1 meeting." else tostring(#sorted) .. " meetings, oldest first.",
 	}
@@ -246,9 +270,9 @@ Context.INLINE_LIMIT = 6000
 -- blank line so your question follows it.
 function Context.attachment(doc: string, titles: { string }, path: string?): string
 	if path then
-		return "Meeting notes from Granola (" .. table.concat(titles, "; ") .. "): read `" .. path .. "`\n\n"
+		return "Meeting notes (" .. table.concat(titles, "; ") .. "): read `" .. path .. "`\n\n"
 	end
-	return "<granola-context>\n\n" .. doc .. "\n</granola-context>\n\n"
+	return "<meeting-context>\n\n" .. doc .. "\n</meeting-context>\n\n"
 end
 
 -- Appended when a new agent has to be started with the context as its first prompt.

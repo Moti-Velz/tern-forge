@@ -1,8 +1,8 @@
 schema = 1
 id = "granola"
-name = "Granola"
-version = "0.3.0"
-description = "Granola meetings beside your terminal: browse and open meetings, gather them from the keyboard, and add them (synthesis or full transcript) to the agent you're working with."
+name = "Meetings"
+version = "0.4.0"
+description = "Meeting notes and transcripts from Granola, Fireflies or a folder of exports, beside your terminal: browse, gather from the keyboard, and add them (synthesis or full transcript) to the agent you're working with."
 icon = "sparkle"
 host = "host.luau"
 window = "window.luau"
@@ -10,5 +10,5 @@ styles = ["styles.css"]
 
 [[blocks]]
 id = "meetings"
-title = "Granola"
+title = "Meetings"
 palette = false
