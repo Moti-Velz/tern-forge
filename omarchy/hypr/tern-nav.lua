@@ -1,7 +1,7 @@
 -- Tern-aware window keys for Omarchy (tern-omarchy).
 --
 -- Load from ~/.config/hypr/bindings.lua:
---   dofile(os.getenv("HOME") .. "/src/tern-omarchy/hypr/tern-nav.lua")
+--   dofile(os.getenv("HOME") .. "/src/tern-factory/omarchy/hypr/tern-nav.lua")
 --
 -- On a Tern window these keys are handed to Tern (the chord is injected into it), which acts on
 -- its panes and bubbles back with `hyprctl dispatch` where it has nothing to do: at the edge of

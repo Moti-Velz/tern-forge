@@ -82,8 +82,8 @@ You need macOS or Linux and:
 | [omp](https://omp.sh) | ticket agents, Visualize PR | optional |
 
 ```sh
-git clone https://github.com/Moti-Velz/tern-forge.git
-cd tern-forge
+git clone https://github.com/Moti-Velz/tern-factory.git
+cd tern-factory/forge
 /Applications/Tern.app/Contents/MacOS/tern plugin link "$PWD"
 ```
 
@@ -146,9 +146,9 @@ forge-links unlink ENG-123
 `skills/forge-links/SKILL.md` teaches agents when and how to use it. To install both:
 
 ```bash
-ln -s ~/src/tern-forge/bin/forge-links ~/.local/bin/forge-links
-ln -s ~/src/tern-forge/skills/forge-links ~/.agents/skills/forge-links    # omp and other agents
-ln -s ~/src/tern-forge/skills/forge-links ~/.claude/skills/forge-links    # Claude Code
+ln -s ~/src/tern-factory/forge/bin/forge-links ~/.local/bin/forge-links
+ln -s ~/src/tern-factory/forge/skills/forge-links ~/.agents/skills/forge-links    # omp and other agents
+ln -s ~/src/tern-factory/forge/skills/forge-links ~/.claude/skills/forge-links    # Claude Code
 ```
 
 `forge-links` reads Forge's project list from `$FORGE_KV` (default `~/.local/state/tern/plugin-data/forge/kv.json`). Without it, it uses the repository you're in, or `--repo`. Without the command, the ticket store is plain Git: `git config "branch.<branch>.forge-ticket" ENG-123`.
