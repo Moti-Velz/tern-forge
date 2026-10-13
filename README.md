@@ -5,7 +5,7 @@ Notes and transcripts from your meetings, in a panel beside the terminal. Suppor
 meetings with the arrow keys and Space, and press Enter to add them to the agent you're working with,
 as the AI synthesis or with full transcripts.
 
-![Meetings panel next to an omp agent that drafted a follow-up email from two meetings](docs/screenshot.png)
+![Meetings panel with a Granola and a Fireflies meeting gathered, next to an omp agent that used both to draft a follow-up email and a deal checklist](docs/screenshot.png)
 
 ## Install
 
