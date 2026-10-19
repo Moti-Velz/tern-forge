@@ -716,8 +716,10 @@ end
 
 -- Tern resizes in cells, and a hidden tab's cells differ from the shown one's,
 -- so steer by the ratio: step, see how far it moved, correct.
-local function sizeTo(cx, tab, pane, wantColumns)
-	local total = tabColumns(cx, tab, pane)
+-- `total` is the tab's real width when known: a tab that isn't laid out yet
+-- (one just switched to) measures far too narrow.
+local function sizeTo(cx, tab, pane, wantColumns, total)
+	total = total or tabColumns(cx, tab, pane)
 	if not total then return end
 	local want = math.clamp(wantColumns / total, 0.1, 0.6)
 	local r = leftShare(cx, tab, pane)
@@ -751,16 +753,14 @@ local function pin(cx, tab)
 	end
 	local target = firstLeaf(layout.root, pane)
 	if not target then return end
-	if from and sized then
+	-- Measure the window in the tab being left: it was just on screen.
+	local total = from and leftShare(cx, from, pane) and tabColumns(cx, from, pane)
+	if from and sized and total then
 		-- You dragged it wider or narrower: remember that width, in columns.
-		local current = leftShare(cx, from, pane)
-		local total = current and tabColumns(cx, from, pane)
-		if current and total then
-			local now = math.floor(current * total + 0.5)
-			if math.abs(now - columns) > 1 then
-				columns = math.clamp(now, 20, 120)
-				tern.kv.set("panel-columns", columns)
-			end
+		local now = math.floor(leftShare(cx, from, pane) * total + 0.5)
+		if math.abs(now - columns) > 1 then
+			columns = math.clamp(now, 20, 120)
+			tern.kv.set("panel-columns", columns)
 		end
 	end
 	if from ~= tab then
@@ -771,7 +771,14 @@ local function pin(cx, tab)
 		end
 	end
 	cx.layout:move(pane, target, "left", { focus = false })
-	sizeTo(cx, tab, pane, columns)
+	if total then
+		sizeTo(cx, tab, pane, columns, total)
+	else
+		-- A tab just switched to isn't laid out yet: size it once it is.
+		tern.timer(100, function(nextCx)
+			if nextCx and nextCx.session:tab_of(pane) == tab then sizeTo(nextCx, tab, pane, columns) end
+		end)
+	end
 	sized = true
 	panelTab = tab
 end

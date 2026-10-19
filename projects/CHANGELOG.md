@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The Projects panel stays a sidebar when you switch projects or worktrees.** A tab just switched to isn't laid out yet, so measuring its width there came out far too narrow, and the panel was pushed to its 60% cap. The next switch then took that as a width you dragged and saved it in `panel-columns` (up to 120), so the panel kept opening at about half the window. The width is now measured in the tab being left, which was just on screen, or, when that isn't possible, once the new tab is laid out.
+
 ## 3.3.0 (2026-10-13)
 
 ### Added
